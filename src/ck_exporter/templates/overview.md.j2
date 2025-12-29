@@ -1,0 +1,84 @@
+# {{ title }}
+
+**Conversation ID**: `{{ conversation_id }}`
+
+## Overview
+
+This document contains knowledge extracted from a ChatGPT conversation.
+
+## Facts
+
+{% if facts %}
+{% for fact in facts %}
+### {{ fact.topic }}: {{ fact.statement }}
+
+**Status**: {{ fact.status }}
+
+{% if fact.evidence %}
+**Evidence**:
+{% for ev in fact.evidence %}
+- Message ID: `{{ ev.message_id }}` at {{ ev.time_iso }}
+{% endfor %}
+{% endif %}
+
+{% endfor %}
+{% else %}
+No facts extracted.
+{% endif %}
+
+## Decisions
+
+{% if decisions %}
+{% for decision in decisions %}
+### {{ decision.topic }}: {{ decision.statement }}
+
+**Status**: {{ decision.status }}
+
+**Rationale**: {{ decision.rationale or "Not provided" }}
+
+{% if decision.alternatives %}
+**Alternatives Considered**:
+{% for alt in decision.alternatives %}
+- {{ alt }}
+{% endfor %}
+{% endif %}
+
+{% if decision.consequences %}
+**Consequences**: {{ decision.consequences }}
+{% endif %}
+
+{% if decision.evidence %}
+**Evidence**:
+{% for ev in decision.evidence %}
+- Message ID: `{{ ev.message_id }}` at {{ ev.time_iso }}
+{% endfor %}
+{% endif %}
+
+{% endfor %}
+{% else %}
+No decisions extracted.
+{% endif %}
+
+## Open Questions
+
+{% if questions %}
+{% for question in questions %}
+### {{ question.question }}
+
+**Topic**: {{ question.topic }}
+
+{% if question.context %}
+**Context**: {{ question.context }}
+{% endif %}
+
+{% if question.evidence %}
+**Evidence**:
+{% for ev in question.evidence %}
+- Message ID: `{{ ev.message_id }}` at {{ ev.time_iso }}
+{% endfor %}
+{% endif %}
+
+{% endfor %}
+{% else %}
+No open questions identified.
+{% endif %}

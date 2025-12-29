@@ -1,0 +1,56 @@
+# Architecture: {{ conversation_id }}
+
+This document describes the architecture and technical decisions extracted from the conversation.
+
+## Architecture Facts
+
+{% if facts %}
+{% for fact in facts %}
+### {{ fact.statement }}
+
+**Status**: {{ fact.status }}
+
+{% if fact.evidence %}
+**Evidence**:
+{% for ev in fact.evidence %}
+- Message ID: `{{ ev.message_id }}` at {{ ev.time_iso }}
+{% endfor %}
+{% endif %}
+
+{% endfor %}
+{% else %}
+No architecture facts extracted.
+{% endif %}
+
+## Architecture Decisions
+
+{% if decisions %}
+{% for decision in decisions %}
+### {{ decision.statement }}
+
+**Status**: {{ decision.status }}
+
+**Rationale**: {{ decision.rationale or "Not provided" }}
+
+{% if decision.alternatives %}
+**Alternatives Considered**:
+{% for alt in decision.alternatives %}
+- {{ alt }}
+{% endfor %}
+{% endif %}
+
+{% if decision.consequences %}
+**Consequences**: {{ decision.consequences }}
+{% endif %}
+
+{% if decision.evidence %}
+**Evidence**:
+{% for ev in decision.evidence %}
+- Message ID: `{{ ev.message_id }}` at {{ ev.time_iso }}
+{% endfor %}
+{% endif %}
+
+{% endfor %}
+{% else %}
+No architecture decisions extracted.
+{% endif %}

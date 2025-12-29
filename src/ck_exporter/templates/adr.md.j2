@@ -1,0 +1,45 @@
+# ADR {{ adr_number }}: {{ decision.statement }}
+
+**Status**: {{ decision.status }}
+**Date**: {{ decision.evidence[0].time_iso if decision.evidence else "Unknown" }}
+**Topic**: {{ decision.topic }}
+
+## Context
+
+{{ decision.statement }}
+
+## Decision
+
+We decided to: {{ decision.statement }}
+
+## Rationale
+
+{{ decision.rationale or "Not provided" }}
+
+## Alternatives Considered
+
+{% if decision.alternatives %}
+{% for alt in decision.alternatives %}
+- {{ alt }}
+{% endfor %}
+{% else %}
+None explicitly listed.
+{% endif %}
+
+## Consequences
+
+{{ decision.consequences or "Not specified" }}
+
+## Evidence
+
+{% if decision.evidence %}
+{% for ev in decision.evidence %}
+- Message ID: `{{ ev.message_id }}` at {{ ev.time_iso }}
+{% endfor %}
+{% else %}
+No evidence links available.
+{% endif %}
+
+## Notes
+
+This decision was extracted from conversation `{{ conversation_id }}`.
