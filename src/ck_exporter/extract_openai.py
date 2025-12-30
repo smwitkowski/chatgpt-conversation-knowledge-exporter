@@ -14,6 +14,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 from ck_exporter.atoms_schema import Atom, DecisionAtom, OpenQuestion
 from ck_exporter.chunking import chunk_messages
 from ck_exporter.export_schema import get_conversation_id, get_title
+from ck_exporter.input_normalize import load_conversations
 from ck_exporter.linearize import linearize_conversation
 
 load_dotenv()
@@ -211,10 +212,14 @@ def extract_export(
     model: Optional[str] = None,
     conversation_id: Optional[str] = None,
 ) -> None:
-    """Process export and extract atoms for all conversations (or a single one if conversation_id is provided)."""
-    import os
+    """
+    Process export and extract atoms for all conversations (or a single one if conversation_id is provided).
 
-    import json
+    Accepts either:
+    - A top-level list of conversations (standard export format)
+    - A single conversation object with mapping/current_node
+    """
+    import os
 
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
@@ -226,11 +231,7 @@ def extract_export(
     console.print(f"[bold]Loading export from[/bold] {input_path}")
     console.print(f"[bold]Using model:[/bold] {model}")
 
-    with open(input_path, "r", encoding="utf-8") as f:
-        conversations = json.load(f)
-
-    if not isinstance(conversations, list):
-        raise ValueError("Expected top-level list of conversations")
+    conversations = load_conversations(input_path)
 
     # Filter to single conversation if requested
     if conversation_id:

@@ -16,6 +16,7 @@ from ck_exporter.export_schema import (
     get_message_role,
     get_title,
 )
+from ck_exporter.input_normalize import load_conversations
 
 console = Console()
 
@@ -111,17 +112,13 @@ def linearize_export(input_path: Path, output_dir: Path) -> None:
     """
     Process ChatGPT export JSON and write linearized conversations.
 
-    Expects a top-level list of conversations.
+    Accepts either:
+    - A top-level list of conversations (standard export format)
+    - A single conversation object with mapping/current_node
     """
-    import json
-
     console.print(f"[bold]Loading export from[/bold] {input_path}")
 
-    with open(input_path, "r", encoding="utf-8") as f:
-        conversations = json.load(f)
-
-    if not isinstance(conversations, list):
-        raise ValueError("Expected top-level list of conversations")
+    conversations = load_conversations(input_path)
 
     console.print(f"[green]Found {len(conversations)} conversations[/green]")
 

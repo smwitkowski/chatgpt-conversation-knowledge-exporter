@@ -43,26 +43,43 @@ This tool processes ChatGPT export JSON files and transforms them into:
 
 ## CLI Usage
 
+The CLI accepts three input formats:
+- **Standard export**: A JSON file containing a list of conversations (standard ChatGPT export format)
+- **Single ChatGPT conversation**: A JSON file containing a single conversation object with `mapping` and `current_node` fields
+- **Claude conversation**: A JSON file containing a Claude AI export with `platform="CLAUDE_AI"` and `chat_messages[]` array
+
 ```bash
-# Linearize conversations
+# Linearize conversations (works with all formats)
 ckx linearize --input chatgpt-export.json --out _evidence
+ckx linearize --input single-conversation.json --out _evidence
+ckx linearize --input claude-export.json --out _evidence
 
 # Extract knowledge atoms (all conversations)
 ckx extract --input chatgpt-export.json --evidence _evidence --out _atoms
 
-# Extract from a single conversation (for testing)
+# Extract from a single conversation file
+ckx extract --input single-conversation.json --evidence _evidence --out _atoms
+ckx extract --input claude-export.json --evidence _evidence --out _atoms
+
+# Extract from a specific conversation in a list (for testing)
 ckx extract --input chatgpt-export.json --evidence _evidence --out _atoms \
   --conversation-id 69335397-c5f4-832a-a049-8fd3cfcbf588
 
 # Compile docs from atoms
 ckx compile --atoms _atoms --out docs
 
-# Run all steps
+# Run all steps (works with all formats)
 ckx run-all --input chatgpt-export.json
+ckx run-all --input single-conversation.json
+ckx run-all --input claude-export.json
 
 # Run all steps on a single conversation (for testing)
 ckx run-all --input chatgpt-export.json --conversation-id 69335397-c5f4-832a-a049-8fd3cfcbf588
 ```
+
+**Notes**:
+- For single ChatGPT conversation files without an `id` or `conversation_id` field, the tool automatically uses the filename (without extension) as the conversation ID.
+- Claude exports are automatically converted to ChatGPT-style format internally, using the Claude `uuid` as the conversation ID.
 
 ## Project Structure
 
