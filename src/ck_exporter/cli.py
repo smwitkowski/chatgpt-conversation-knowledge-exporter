@@ -15,7 +15,7 @@ console = Console()
 
 @app.command()
 def linearize(
-    input: Path = typer.Option(..., "--input", "-i", help="Path to ChatGPT export JSON"),
+    input: Path = typer.Option(..., "--input", "-i", help="Path to ChatGPT export JSON (list) or single-conversation JSON (object with mapping/current_node)"),
     out: Path = typer.Option(Path("_evidence"), "--out", "-o", help="Output directory for evidence"),
 ) -> None:
     """Linearize conversations from export JSON into markdown."""
@@ -28,7 +28,7 @@ def linearize(
 
 @app.command()
 def extract(
-    input: Path = typer.Option(..., "--input", "-i", help="Path to ChatGPT export JSON"),
+    input: Path = typer.Option(..., "--input", "-i", help="Path to ChatGPT export JSON (list) or single-conversation JSON (object with mapping/current_node)"),
     evidence: Path = typer.Option(Path("_evidence"), "--evidence", "-e", help="Evidence directory"),
     out: Path = typer.Option(Path("_atoms"), "--out", "-o", help="Output directory for atoms"),
     model: str = typer.Option(None, "--model", "-m", help="OpenAI model to use"),
@@ -53,7 +53,7 @@ def compile(
 
 @app.command()
 def run_all(
-    input: Path = typer.Option(..., "--input", "-i", help="Path to ChatGPT export JSON"),
+    input: Path = typer.Option(..., "--input", "-i", help="Path to ChatGPT export JSON (list) or single-conversation JSON (object with mapping/current_node)"),
     evidence_dir: Path = typer.Option(Path("_evidence"), "--evidence", "-e", help="Evidence directory"),
     atoms_dir: Path = typer.Option(Path("_atoms"), "--atoms", "-a", help="Atoms directory"),
     docs_dir: Path = typer.Option(Path("docs"), "--docs", "-d", help="Docs directory"),
