@@ -3,10 +3,11 @@
 import json
 from pathlib import Path
 from tempfile import NamedTemporaryFile
+from tempfile import TemporaryDirectory
 
 import pytest
 
-from ck_exporter.input_normalize import (
+from ck_exporter.pipeline.io import (
     is_chatgpt_single_conversation,
     load_conversations,
 )
@@ -203,6 +204,142 @@ def test_load_conversations_invalid_json():
     try:
         with pytest.raises(json.JSONDecodeError):
             load_conversations(temp_path)
+    finally:
+        temp_path.unlink()
+
+
+def test_load_conversations_directory_of_single_conversations():
+    """Directory input should load many per-conversation JSON files."""
+    conv_a = {
+        "title": "A",
+        "mapping": {"node-1": {"message": None, "parent": None}},
+        "current_node": "node-1",
+    }
+    conv_b = {
+        "title": "B",
+        "mapping": {"node-2": {"message": None, "parent": None}},
+        "current_node": "node-2",
+    }
+
+    with TemporaryDirectory() as d:
+        dir_path = Path(d)
+        a_path = dir_path / "chatgpt_a.json"
+        b_path = dir_path / "chatgpt_b.json"
+        a_path.write_text(json.dumps(conv_a), encoding="utf-8")
+        b_path.write_text(json.dumps(conv_b), encoding="utf-8")
+
+        result = load_conversations(dir_path)
+        assert len(result) == 2
+
+        ids = {r.get("conversation_id") or r.get("id") for r in result}
+        assert ids == {"chatgpt_a", "chatgpt_b"}
+
+
+def test_load_conversations_directory_limit_deterministic():
+    """Directory input with limit should return first N files by sorted filename."""
+    conv_a = {
+        "title": "A",
+        "mapping": {"node-1": {"message": None, "parent": None}},
+        "current_node": "node-1",
+    }
+    conv_b = {
+        "title": "B",
+        "mapping": {"node-2": {"message": None, "parent": None}},
+        "current_node": "node-2",
+    }
+    conv_c = {
+        "title": "C",
+        "mapping": {"node-3": {"message": None, "parent": None}},
+        "current_node": "node-3",
+    }
+
+    with TemporaryDirectory() as d:
+        dir_path = Path(d)
+        # Create files in non-alphabetical order to test sorting
+        z_path = dir_path / "z_conv.json"
+        a_path = dir_path / "a_conv.json"
+        m_path = dir_path / "m_conv.json"
+        z_path.write_text(json.dumps(conv_c), encoding="utf-8")
+        a_path.write_text(json.dumps(conv_a), encoding="utf-8")
+        m_path.write_text(json.dumps(conv_b), encoding="utf-8")
+
+        # Limit to 2 should return first 2 by sorted filename (a_conv, m_conv)
+        result = load_conversations(dir_path, limit=2)
+        assert len(result) == 2
+
+        ids = {r.get("conversation_id") or r.get("id") for r in result}
+        assert ids == {"a_conv", "m_conv"}  # Should be sorted alphabetically
+
+        # Limit to 1 should return only first file
+        result = load_conversations(dir_path, limit=1)
+        assert len(result) == 1
+        assert result[0].get("conversation_id") or result[0].get("id") == "a_conv"
+
+        # Limit larger than available should return all
+        result = load_conversations(dir_path, limit=10)
+        assert len(result) == 3
+
+
+def test_load_conversations_list_limit():
+    """List input with limit should return first N conversations."""
+    conversations = [
+        {"id": "conv-1", "title": "First"},
+        {"id": "conv-2", "title": "Second"},
+        {"id": "conv-3", "title": "Third"},
+        {"id": "conv-4", "title": "Fourth"},
+    ]
+
+    with NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+        json.dump(conversations, f)
+        temp_path = Path(f.name)
+
+    try:
+        # Limit to 2 should return first 2
+        result = load_conversations(temp_path, limit=2)
+        assert len(result) == 2
+        assert result[0]["id"] == "conv-1"
+        assert result[1]["id"] == "conv-2"
+
+        # Limit to 1 should return first 1
+        result = load_conversations(temp_path, limit=1)
+        assert len(result) == 1
+        assert result[0]["id"] == "conv-1"
+
+        # Limit larger than available should return all
+        result = load_conversations(temp_path, limit=10)
+        assert len(result) == 4
+
+        # No limit should return all
+        result = load_conversations(temp_path)
+        assert len(result) == 4
+    finally:
+        temp_path.unlink()
+
+
+def test_load_conversations_single_file_limit():
+    """Single file input with limit should still respect limit."""
+    single_conv = {
+        "title": "Test Conversation",
+        "mapping": {"node-1": {"message": None, "parent": None}},
+        "current_node": "node-1",
+    }
+
+    with NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+        json.dump(single_conv, f)
+        temp_path = Path(f.name)
+
+    try:
+        # Limit to 1 should return the conversation
+        result = load_conversations(temp_path, limit=1)
+        assert len(result) == 1
+
+        # Limit to 0 should return empty list
+        result = load_conversations(temp_path, limit=0)
+        assert len(result) == 0
+
+        # No limit should return the conversation
+        result = load_conversations(temp_path)
+        assert len(result) == 1
     finally:
         temp_path.unlink()
 

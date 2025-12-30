@@ -1,1 +1,1 @@
-"""Tests for ck_exporter."""
+"""Test suite for ck_exporter."""

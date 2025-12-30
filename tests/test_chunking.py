@@ -2,7 +2,7 @@
 
 import pytest
 
-from ck_exporter.chunking import chunk_messages, chunk_text, estimate_tokens
+from ck_exporter.utils.chunking import chunk_messages, chunk_text, estimate_tokens
 
 
 def test_estimate_tokens():
