@@ -6,7 +6,7 @@ from tempfile import TemporaryDirectory
 
 import pytest
 
-from ck_exporter.linearize import linearize_conversation, linearize_export, write_conversation_markdown
+from ck_exporter.pipeline.linearize import linearize_conversation, linearize_export, write_conversation_markdown
 
 
 @pytest.fixture

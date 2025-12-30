@@ -6,7 +6,7 @@ from tempfile import NamedTemporaryFile
 
 import pytest
 
-from ck_exporter.input_normalize import (
+from ck_exporter.pipeline.io import (
     convert_claude_to_chatgpt,
     is_claude_conversation,
     load_conversations,
@@ -84,6 +84,8 @@ def test_convert_claude_to_chatgpt_basic():
     claude_conv = {
         "uuid": "claude-uuid-123",
         "name": "Test Claude Conversation",
+        "project_uuid": "proj-uuid-999",
+        "project": {"uuid": "proj-uuid-999", "name": "Test Project"},
         "chat_messages": [
             {
                 "uuid": "msg-1",
@@ -104,6 +106,8 @@ def test_convert_claude_to_chatgpt_basic():
 
     assert result["conversation_id"] == "claude-uuid-123"
     assert result["title"] == "Test Claude Conversation"
+    assert result["project_id"] == "proj-uuid-999"
+    assert result["project_name"] == "Test Project"
     assert result["current_node"] == "msg-2"
     assert "mapping" in result
     assert "msg-1" in result["mapping"]

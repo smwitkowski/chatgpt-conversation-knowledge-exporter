@@ -32,6 +32,14 @@ ENV/
 # Environment variables
 .env
 
+# Local caches / scratch
+.cache/
+.mypy_cache/
+.ruff_cache/
+
+# Logs
+*.log
+
 # IDE
 .vscode/
 .idea/
@@ -51,6 +59,12 @@ _evidence/
 docs/
 *.xml
 chatgpt-export.json
+
+# Raw/private exports + derived datasets (do not commit)
+data/
+output/
+all_conversations.json
+*.zip
 
 # OS
 .DS_Store
