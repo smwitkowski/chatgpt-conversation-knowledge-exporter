@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Meeting artifact ingestion: `--input` now accepts `.md` and `.txt` files (Google Meet notes, Teams transcripts)
+- Stable document IDs for meeting artifacts (`meeting__<slug>__<hash8>`)
+- Timestamp normalization for transcript message IDs (`HH:MM:SS` format)
 - **Human-readable CLI logging**: New `--log-mode` option with `human`, `hybrid`, `machine`, and `auto` modes for optimized logging based on use case (interactive development vs CI/CD)
 - **Hybrid logging mode**: Rich console output for human readability + structured JSON logs to file for programmatic analysis
 - **Automatic mode detection**: `--log-mode auto` (default) automatically selects appropriate mode based on TTY detection and `--log-file` presence

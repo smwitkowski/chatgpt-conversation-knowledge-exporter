@@ -343,3 +343,54 @@ def test_load_conversations_single_file_limit():
     finally:
         temp_path.unlink()
 
+
+def test_load_conversations_md_file():
+    """Test loading single Markdown meeting file returns 1 conversation."""
+    md_content = """# Meeting Notes
+
+## Summary
+
+This is a summary.
+"""
+
+    with NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
+        f.write(md_content)
+        temp_path = Path(f.name)
+
+    try:
+        result = load_conversations(temp_path)
+        assert len(result) == 1
+        assert "conversation_id" in result[0]
+        assert result[0]["conversation_id"].startswith("meeting__")
+        assert "mapping" in result[0]
+        assert "current_node" in result[0]
+        assert result[0]["title"] == "Meeting Notes"
+    finally:
+        temp_path.unlink()
+
+
+def test_load_conversations_txt_file():
+    """Test loading single text transcript file returns 1 conversation."""
+    txt_content = """1:08 : Tanya Gastelum : Good afternoon.
+1:09 : Scott Anderson : Hey, how are you?
+"""
+
+    with NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+        f.write(txt_content)
+        temp_path = Path(f.name)
+
+    try:
+        result = load_conversations(temp_path)
+        assert len(result) == 1
+        assert "conversation_id" in result[0]
+        assert result[0]["conversation_id"].startswith("meeting__")
+        assert "mapping" in result[0]
+        assert "current_node" in result[0]
+        # Should have timestamp-based messages
+        mapping = result[0]["mapping"]
+        assert "00:01:08" in mapping
+        assert "00:01:09" in mapping
+    finally:
+        temp_path.unlink()
+
+

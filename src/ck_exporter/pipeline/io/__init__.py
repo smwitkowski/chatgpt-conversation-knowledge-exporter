@@ -7,6 +7,11 @@ from ck_exporter.pipeline.io.load import (
     load_conversations,
     parse_iso_timestamp,
 )
+from ck_exporter.pipeline.io.meeting_notes import (
+    is_meeting_artifact,
+    parse_markdown_meeting,
+    parse_text_transcript,
+)
 from ck_exporter.pipeline.io.schema_helpers import (
     get_conversation_id,
     get_current_node,
@@ -26,6 +31,9 @@ __all__ = [
     "is_claude_conversation",
     "is_chatgpt_single_conversation",
     "parse_iso_timestamp",
+    "is_meeting_artifact",
+    "parse_markdown_meeting",
+    "parse_text_transcript",
     "get_conversation_id",
     "get_current_node",
     "get_mapping",

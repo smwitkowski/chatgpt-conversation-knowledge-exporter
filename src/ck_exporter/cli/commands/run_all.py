@@ -25,7 +25,7 @@ def run_all_command(
     ),
     evidence_dir: Path = typer.Option(Path("_evidence"), "--evidence", "-e", help="Evidence directory"),
     atoms_dir: Path = typer.Option(Path("_atoms"), "--atoms", "-a", help="Atoms directory"),
-    docs_dir: Path = typer.Option(Path("docs"), "--docs", "-d", help="Docs directory"),
+    docs_dir: Path = typer.Option(Path("project/docs"), "--docs", "-d", help="Docs directory"),
     fast_model: str = typer.Option(None, "--fast-model", help="Fast model for Pass 1 (default: z-ai/glm-4.7)"),
     big_model: str = typer.Option(None, "--big-model", help="Big model for Pass 2 (default: z-ai/glm-4.7)"),
     max_concurrency: int = typer.Option(None, "--max-concurrency", help="Max concurrent conversations (default: 8)"),

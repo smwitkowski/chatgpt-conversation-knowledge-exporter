@@ -12,7 +12,7 @@ console = Console()
 
 def consolidate_command(
     atoms: Path = typer.Option(Path("_atoms"), "--atoms", "-a", help="Atoms directory (per-conversation)"),
-    docs: Path = typer.Option(Path("docs"), "--docs", "-d", help="Docs directory (per-conversation)"),
+    docs: Path = typer.Option(Path("project/docs"), "--docs", "-d", help="Docs directory (per-conversation)"),
     out: Path = typer.Option(Path("output"), "--out", "-o", help="Output directory"),
     include_docs: bool = typer.Option(True, "--include-docs/--no-include-docs", help="Concatenate docs into bundles"),
 ) -> None:

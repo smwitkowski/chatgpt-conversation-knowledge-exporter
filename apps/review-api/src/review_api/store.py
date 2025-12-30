@@ -18,14 +18,14 @@ class KnowledgeStore:
 
     def __init__(self, base_path: Path):
         """
-        Initialize store from base directory containing output/, docs/, _atoms/, _evidence/.
+        Initialize store from base directory containing output/, project/docs/, _atoms/, _evidence/.
 
         Args:
-            base_path: Root directory of the project (should contain output/, docs/, etc.)
+            base_path: Root directory of the project (should contain output/, project/docs/, etc.)
         """
         self.base_path = Path(base_path).resolve()
         self.output_dir = self.base_path / "output"
-        self.docs_dir = self.base_path / "docs"
+        self.docs_dir = self.base_path / "project" / "docs"
         self.atoms_dir = self.base_path / "_atoms"
         self.evidence_dir = self.base_path / "_evidence"
 
