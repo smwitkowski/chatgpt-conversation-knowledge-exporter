@@ -1,0 +1,49 @@
+{
+    "ck_exporter-core": {
+        "components": [
+            "src.ck_exporter.core.models.atoms.Atom",
+            "src.ck_exporter.core.models.atoms.DecisionAtom",
+            "src.ck_exporter.core.models.atoms.OpenQuestion",
+            "src.ck_exporter.core.models.topics.Topic",
+            "src.ck_exporter.core.models.topics.TopicAssignment",
+            "src.ck_exporter.core.ports.atom_extractor.AtomExtractor",
+            "src.ck_exporter.core.ports.embedder.Embedder",
+            "src.ck_exporter.core.ports.llm.LLMClient",
+            "src.ck_exporter.core.ports.topic_labeler.TopicLabeler"
+        ],
+        "children": {}
+    },
+    "review-api": {
+        "components": [
+            "apps.review-api.src.review_api.store.KnowledgeStore",
+            "apps.review-api.src.review_api.search.SearchIndex",
+            "apps.review-api.src.review_api.addons.AddonRegistry",
+            "apps.review-api.src.review_api.bundler.ZipBundler",
+            "apps.review-ui.src.types.TopicSummary"
+        ],
+        "children": {}
+    },
+    "ck_exporter-adapters": {
+        "components": [
+            "src.ck_exporter.adapters.openrouter_atom_extractor.OpenRouterAtomExtractor",
+            "src.ck_exporter.adapters.dspy_atom_refiner.DspyAtomRefiner",
+            "src.ck_exporter.adapters.openrouter_embedder.OpenRouterEmbedder",
+            "src.ck_exporter.adapters.openrouter_llm.OpenRouterLLMClient",
+            "src.ck_exporter.adapters.openrouter_topic_labeler.OpenRouterTopicLabeler",
+            "src.ck_exporter.adapters.dspy_topic_labeler.DspyTopicLabeler",
+            "src.ck_exporter.adapters.hybrid_atom_extractor.HybridAtomExtractor",
+            "src.ck_exporter.programs.dspy.label_topic.LabelTopicProgram",
+            "src.ck_exporter.programs.dspy.refine_atoms.RefineAtomsProgram"
+        ],
+        "children": {}
+    },
+    "ck_exporter-pipeline": {
+        "components": [
+            "src.ck_exporter.pipeline.consolidate.ConsolidateStats",
+            "src.ck_exporter.logging.configure_logging",
+            "src.ck_exporter.ui.dashboard.PipelineDashboard",
+            "src.ck_exporter.embeddings.EmbeddingClient"
+        ],
+        "children": {}
+    }
+}

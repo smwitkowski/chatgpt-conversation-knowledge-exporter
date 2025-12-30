@@ -56,7 +56,6 @@ htmlcov/
 # Project-specific generated artifacts
 _atoms/
 _evidence/
-docs/
 *.xml
 chatgpt-export.json
 
