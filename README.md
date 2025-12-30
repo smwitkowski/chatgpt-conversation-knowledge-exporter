@@ -36,9 +36,10 @@ This tool processes ChatGPT export JSON files and transforms them into:
 
    Or run steps individually:
    ```bash
-   make linearize  # Extract conversations to markdown
-   make extract    # Extract knowledge atoms using OpenAI
-   make compile    # Compile atoms into docs
+   make linearize     # Extract conversations to markdown
+   make extract       # Extract knowledge atoms using OpenAI
+   make compile       # Compile atoms into docs
+   make consolidate   # Aggregate per-conversation outputs into project-wide packet
    ```
 
 ## CLI Usage
@@ -75,6 +76,12 @@ ckx run-all --input claude-export.json
 
 # Run all steps on a single conversation (for testing)
 ckx run-all --input chatgpt-export.json --conversation-id 69335397-c5f4-832a-a049-8fd3cfcbf588
+
+# Consolidate per-conversation outputs into project-wide knowledge packet
+ckx consolidate --atoms _atoms --docs docs --out output
+
+# Consolidate without concatenating markdown docs
+ckx consolidate --atoms _atoms --docs docs --out output --no-include-docs
 ```
 
 **Notes**:
@@ -93,7 +100,7 @@ ckx run-all --input chatgpt-export.json --conversation-id 69335397-c5f4-832a-a04
 │       ├── facts.jsonl
 │       ├── decisions.jsonl
 │       └── open_questions.jsonl
-├── docs/              # Compiled documentation
+├── docs/              # Compiled documentation (per-conversation)
 │   ├── <conversation_id>/
 │   │   ├── overview.md
 │   │   ├── architecture.md
@@ -101,6 +108,14 @@ ckx run-all --input chatgpt-export.json --conversation-id 69335397-c5f4-832a-a04
 │   └── decisions/
 │       └── <conversation_id>/
 │           └── ADR-*.md
+├── output/            # Consolidated project-wide outputs
+│   └── project/
+│       ├── atoms.jsonl
+│       ├── decisions.jsonl
+│       ├── open_questions.jsonl
+│       ├── manifest.md
+│       ├── docs_concat.md      # (optional) Concatenated docs
+│       └── adrs_concat.md      # (optional) Concatenated ADRs
 └── src/ck_exporter/   # Source code
 ```
 

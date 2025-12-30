@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Support for single-conversation JSON files (objects with `mapping`/`current_node`) in addition to list-based exports
 - Automatic conversation ID injection from filename when `id`/`conversation_id` is missing in single conversation files
 - Support for Claude AI export JSON inputs (converted to ChatGPT-style mapping internally)
+- `consolidate` command to aggregate per-conversation outputs into project-wide knowledge packet with exact-match deduplication
 
 ### Changed
 - Switched from traditional venv/pip to `uv` for faster dependency management

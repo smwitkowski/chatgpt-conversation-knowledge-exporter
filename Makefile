@@ -1,4 +1,4 @@
-.PHONY: install sync linearize extract compile all test clean
+.PHONY: install sync linearize extract compile consolidate all test clean
 
 # Input file
 INPUT := chatgpt-export.json
@@ -7,6 +7,7 @@ INPUT := chatgpt-export.json
 EVIDENCE_DIR := _evidence
 ATOMS_DIR := _atoms
 DOCS_DIR := docs
+OUTPUT_DIR := output
 
 install sync:
 	uv sync --extra dev
@@ -19,6 +20,9 @@ extract:
 
 compile:
 	uv run ckx compile --atoms $(ATOMS_DIR) --out $(DOCS_DIR)
+
+consolidate:
+	uv run ckx consolidate --atoms $(ATOMS_DIR) --docs $(DOCS_DIR) --out $(OUTPUT_DIR)
 
 all: linearize extract compile
 
