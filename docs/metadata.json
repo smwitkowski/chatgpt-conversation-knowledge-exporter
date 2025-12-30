@@ -1,0 +1,23 @@
+{
+    "generation_info": {
+        "timestamp": "2025-12-30T12:49:30.595341",
+        "main_model": "google/gemini-3-pro-preview",
+        "generator_version": "1.0.0",
+        "repo_path": "/Users/stephen/Projects/scratch/chatgpt-conversation-knowledge-exporter",
+        "commit_id": null
+    },
+    "statistics": {
+        "total_components": 153,
+        "leaf_nodes": 51,
+        "max_depth": 2
+    },
+    "files_generated": [
+        "overview.md",
+        "module_tree.json",
+        "first_module_tree.json",
+        "ck_exporter-adapters.md",
+        "ck_exporter-pipeline.md",
+        "review-api.md",
+        "ck_exporter-core.md"
+    ]
+}
