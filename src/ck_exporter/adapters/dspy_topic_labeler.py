@@ -53,7 +53,7 @@ class DspyTopicLabeler:
         """
         # Format representative docs
         doc_samples = "\n\n---\n\n".join(
-            [f"Conversation ID: {conv_id}\n\n{doc_text[:500]}..." for conv_id, doc_text in representative_docs]
+            [f"Conversation ID: {conv_id}\n\n{doc_text}" for conv_id, doc_text in representative_docs]
         )
 
         # Format keywords

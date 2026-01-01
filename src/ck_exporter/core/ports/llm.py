@@ -14,6 +14,7 @@ class LLMClient(Protocol):
         *,
         temperature: float = 0.3,
         json_object: bool = False,
+        max_tokens: int | None = None,
     ) -> str:
         """
         Generate a chat completion.
@@ -24,6 +25,7 @@ class LLMClient(Protocol):
             user: User message content
             temperature: Sampling temperature (default 0.3)
             json_object: If True, request JSON object response format
+            max_tokens: Optional maximum tokens to generate (default None = no cap)
 
         Returns:
             Generated text content (may contain JSON if json_object=True)

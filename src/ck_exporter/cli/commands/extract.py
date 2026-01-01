@@ -27,10 +27,19 @@ def extract_command(
     use_openrouter: bool = typer.Option(True, "--openrouter/--no-openrouter", help="Use OpenRouter API (default: True)"),
     conversation_id: str = typer.Option(None, "--conversation-id", "-c", help="Process only this conversation ID (for testing)"),
     limit: Optional[int] = typer.Option(None, "--limit", "-n", help="Limit number of conversations to process (deterministic: first N by sorted filename)"),
+    input_kind: str = typer.Option("meeting", "--input-kind", help="How to interpret non-JSON files: meeting|document (default: meeting)"),
 ) -> None:
     """Extract knowledge atoms from conversations using two-pass OpenRouter pipeline."""
     if not input.exists():
         console.print(f"[red]Input path not found: {input}[/red]")
+        raise typer.Exit(1)
+
+    if input_kind not in ("meeting", "document"):
+        console.print(f"[red]Invalid input-kind: {input_kind}. Must be 'meeting' or 'document'[/red]")
+        raise typer.Exit(1)
+
+    if input_kind == "document" and not input.is_dir():
+        console.print(f"[red]Document mode requires a directory input, got: {input}[/red]")
         raise typer.Exit(1)
 
     extract_export(
@@ -44,4 +53,5 @@ def extract_command(
         use_openrouter=use_openrouter,
         conversation_id=conversation_id,
         limit=limit,
+        non_json_kind=input_kind,
     )

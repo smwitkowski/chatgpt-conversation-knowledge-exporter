@@ -141,7 +141,7 @@ from ck_exporter.pipeline.consolidate import consolidate_project
 
 stats = consolidate_project(
     atoms_dir=Path("./output/conversations"),
-    docs_dir=Path("./project/docs"),
+    docs_dir=Path("./output/project/docs"),
     out_dir=Path("./output"),
     include_docs=True
 )

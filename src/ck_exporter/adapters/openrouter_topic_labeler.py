@@ -3,6 +3,7 @@
 import json
 from typing import Any
 
+from ck_exporter.config import get_llm_max_tokens
 from ck_exporter.core.ports.llm import LLMClient
 from ck_exporter.core.ports.topic_labeler import TopicLabeler
 from ck_exporter.logging import get_logger
@@ -73,6 +74,7 @@ Return ONLY valid JSON with this structure:
                 system="You are a topic labeling assistant. Return only valid JSON.",
                 user=prompt,
                 temperature=0.3,
+                max_tokens=get_llm_max_tokens("TOPIC_LABEL"),
             )
 
             if content:

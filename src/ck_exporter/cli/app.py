@@ -15,7 +15,11 @@ from ck_exporter.cli.commands import (
     linearize_command,
     run_all_command,
 )
+from ck_exporter.config import _ensure_env_loaded
 from ck_exporter.logging import configure_logging
+
+# Load .env file at module import time
+_ensure_env_loaded()
 
 app = typer.Typer(help="ChatGPT Conversation Knowledge Exporter")
 

@@ -60,14 +60,14 @@ classDiagram
 #### 1. KnowledgeStore
 **Location**: `apps.review-api.src.review_api.store.KnowledgeStore`
 
-The `KnowledgeStore` is the data access layer. It initializes by scanning a specific directory structure (containing `output/`, `project/docs/`, `_atoms/`, etc.) and builds in-memory indexes for fast retrieval.
+The `KnowledgeStore` is the data access layer. It initializes by scanning a specific directory structure (containing `output/`, `output/project/docs/`, `_atoms/`, etc.) and builds in-memory indexes for fast retrieval.
 
 *   **Data Sources**:
     *   `topic_registry.json`: Definitions of identified topics.
     *   `assignments.jsonl`: Mapping of conversations to topics.
     *   `review_queue.jsonl`: Items flagged for manual review.
-    *   `_atoms/` & `project/`: Extracted atoms (facts, decisions, questions).
-    *   `project/docs/`: Markdown documentation and ADRs.
+    *   `_atoms/` & `output/project/`: Extracted atoms (facts, decisions, questions).
+    *   `output/project/docs/`: Markdown documentation and ADRs.
 
 *   **Key Responsibilities**:
     *   Aggregating statistics (atom counts, conversation counts).
@@ -113,7 +113,7 @@ The following diagram illustrates how data flows from the file system through th
 flowchart LR
     subgraph FileSystem [File System Artifacts]
         Output[output/*.jsonl]
-        Docs[project/docs/*.md]
+        Docs[output/project/docs/*.md]
         Atoms[_atoms/*.jsonl]
     end
 

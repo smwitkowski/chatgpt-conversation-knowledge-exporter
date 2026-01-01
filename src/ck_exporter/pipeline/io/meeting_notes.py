@@ -3,6 +3,7 @@
 Supports:
 - Markdown meeting notes (Google Meet style with notes + transcript)
 - Plain text transcripts (Teams style with timestamped lines)
+- Word documents (.docx) with meeting notes (Google Meet style with notes + transcript)
 """
 
 import hashlib
@@ -10,6 +11,11 @@ import re
 from pathlib import Path
 from typing import Dict, List, Optional
 from urllib.parse import quote
+
+try:
+    from docx import Document
+except ImportError:
+    Document = None  # type: ignore
 
 
 def normalize_timestamp(raw: str) -> str:
@@ -359,15 +365,172 @@ def parse_text_transcript(path: Path) -> Dict:
     }
 
 
+def parse_docx_meeting(path: Path) -> Dict:
+    """
+    Parse a Word document (.docx) meeting notes file into a synthetic conversation dict.
+
+    Splits the document by headings (similar to parse_markdown_meeting):
+    - Notes sections become "system" messages with IDs like "notes:summary"
+    - Transcript timestamp sections become messages with normalized timestamp IDs
+
+    Args:
+        path: Path to .docx file
+
+    Returns:
+        Synthetic conversation dict with mapping/current_node structure
+
+    Raises:
+        ImportError: If python-docx is not installed
+    """
+    if Document is None:
+        raise ImportError(
+            "python-docx is required to parse .docx files. "
+            "Install it with: pip install python-docx"
+        )
+
+    content_bytes = path.read_bytes()
+    doc = Document(path)
+    doc_id = generate_document_id(path, content_bytes)
+
+    # Extract title from first heading or filename
+    title = path.stem
+    for para in doc.paragraphs[:20]:  # Check first 20 paragraphs for title
+        style = para.style.name if para.style else 'normal'
+        text = para.text.strip()
+        if style.startswith('Heading') or style == 'Title':
+            title = text
+            break
+
+    # Split content by headings
+    sections = []
+    current_section = {"heading": None, "level": 0, "content": []}
+
+    for para in doc.paragraphs:
+        style = para.style.name if para.style else 'normal'
+        text = para.text.strip()
+
+        # Skip empty paragraphs but preserve them in content for spacing
+        if not text:
+            if current_section["content"]:
+                current_section["content"].append("")
+            continue
+
+        # Check if it's a heading
+        if style.startswith('Heading'):
+            # Save previous section if it has content
+            if current_section["heading"] is not None or current_section["content"]:
+                sections.append(current_section)
+
+            # Extract heading level
+            level = int(style.split()[-1]) if style.split()[-1].isdigit() else 1
+            current_section = {
+                "heading": text,
+                "level": level,
+                "content": []
+            }
+        elif style == 'Title':
+            # Title is like a top-level heading
+            if current_section["heading"] is not None or current_section["content"]:
+                sections.append(current_section)
+            current_section = {
+                "heading": text,
+                "level": 1,
+                "content": []
+            }
+        else:
+            current_section["content"].append(text)
+
+    # Add final section
+    if current_section["heading"] is not None or current_section["content"]:
+        sections.append(current_section)
+
+    # Build mapping structure (same logic as parse_markdown_meeting)
+    mapping = {}
+    previous_node_id = None
+
+    for section in sections:
+        if not section["heading"] and not section["content"]:
+            continue
+
+        heading = section["heading"] or ""
+        section_text = '\n'.join(section["content"]).strip()
+
+        # Check if this is a transcript timestamp section
+        timestamp = _is_timestamp_heading(heading)
+        if timestamp:
+            # This is a transcript message
+            message_id = normalize_timestamp(timestamp)
+            role = "user"  # Transcript messages are user-like
+        else:
+            # This is a notes section
+            slug = _slugify_heading(heading) if heading else "preface"
+            message_id = f"notes:{slug}"
+            role = "system"
+
+            # Special case: prepend action items hint for checklist sections
+            heading_lower = heading.lower()
+            if ("next steps" in heading_lower or "action" in heading_lower or
+                "todo" in heading_lower or "tasks" in heading_lower):
+                section_text = f"Action items (treat as commitments/tasks):\n\n{section_text}"
+
+        # Combine heading and content
+        if heading:
+            full_text = f"{heading}\n\n{section_text}" if section_text else heading
+        else:
+            full_text = section_text
+
+        if not full_text.strip():
+            continue
+
+        # Create message node
+        node_id = message_id
+        mapping[node_id] = {
+            "id": node_id,
+            "parent": previous_node_id,
+            "message": {
+                "id": message_id,
+                "author": {
+                    "role": role,
+                    "name": None,
+                    "metadata": {},
+                },
+                "create_time": None,  # No absolute time for v1
+                "update_time": None,
+                "content": {
+                    "content_type": "text",
+                    "parts": [full_text],
+                },
+                "status": "finished_successfully",
+                "end_turn": True,
+                "weight": 1,
+                "metadata": {},
+                "recipient": "all",
+                "channel": None,
+            },
+        }
+
+        previous_node_id = node_id
+
+    # Current node is the last message
+    current_node = previous_node_id if previous_node_id else None
+
+    return {
+        "conversation_id": doc_id,
+        "title": title or "Untitled Meeting",
+        "mapping": mapping,
+        "current_node": current_node,
+    }
+
+
 def is_meeting_artifact(path: Path) -> bool:
     """
-    Check if a file path is a meeting artifact (Markdown or text).
+    Check if a file path is a meeting artifact (Markdown, text, or Word document).
 
     Args:
         path: File path to check
 
     Returns:
-        True if file is .md or .txt, False otherwise
+        True if file is .md, .txt, or .docx, False otherwise
     """
-    return path.suffix.lower() in ('.md', '.txt')
+    return path.suffix.lower() in ('.md', '.txt', '.docx')
 

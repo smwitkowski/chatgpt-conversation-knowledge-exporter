@@ -7,6 +7,7 @@ from ck_exporter.pipeline.io.load import (
     load_conversations,
     parse_iso_timestamp,
 )
+from ck_exporter.pipeline.io.documents import parse_docx_document, parse_markdown_document
 from ck_exporter.pipeline.io.meeting_notes import (
     is_meeting_artifact,
     parse_markdown_meeting,
@@ -34,6 +35,8 @@ __all__ = [
     "is_meeting_artifact",
     "parse_markdown_meeting",
     "parse_text_transcript",
+    "parse_markdown_document",
+    "parse_docx_document",
     "get_conversation_id",
     "get_current_node",
     "get_mapping",

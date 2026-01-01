@@ -6,7 +6,7 @@ INPUT := chatgpt-export.json
 # Output directories (can be overridden)
 EVIDENCE_DIR := _evidence
 ATOMS_DIR := _atoms
-DOCS_DIR := docs
+DOCS_DIR := output/project/docs
 OUTPUT_DIR := output
 
 # Topic modeling outputs

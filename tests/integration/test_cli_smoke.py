@@ -261,3 +261,115 @@ def test_run_all_dashboard_flag_non_tty(sample_export_file: Path, tmp_path: Path
     )
     # Should handle gracefully (either disable dashboard or run without it)
     assert result.exit_code == 0
+
+
+def test_run_all_split_by_subdir(tmp_path: Path):
+    """Test that run-all splits outputs by typed subdirectories."""
+    # Create a dataset directory with typed subfolders
+    dataset_dir = tmp_path / "test_dataset"
+    dataset_dir.mkdir()
+
+    # Create documents subfolder with a minimal markdown file
+    documents_dir = dataset_dir / "documents"
+    documents_dir.mkdir()
+    (documents_dir / "test_doc.md").write_text("# Test Document\n\nThis is a test document.")
+
+    # Create meeting_artifacts subfolder with a minimal markdown file
+    meetings_dir = dataset_dir / "meeting_artifacts"
+    meetings_dir.mkdir()
+    (meetings_dir / "test_meeting.md").write_text("# Test Meeting\n\n## Notes\n\nMeeting notes here.")
+
+    # Create ai_conversations subfolder with a minimal JSON conversation
+    ai_dir = dataset_dir / "ai_conversations"
+    ai_dir.mkdir()
+    ai_conv = {
+        "id": "test-ai-conv",
+        "conversation_id": "test-ai-conv",
+        "title": "Test AI Conversation",
+        "mapping": {
+            "msg-1": {
+                "id": "msg-1",
+                "parent": None,
+                "message": {
+                    "id": "msg-1",
+                    "author": {"role": "user"},
+                    "create_time": 1704067200.0,
+                    "content": {"parts": ["Hello, this is a test message."]},
+                },
+            }
+        },
+        "current_node": "msg-1",
+    }
+    (ai_dir / "test_ai.json").write_text(json.dumps(ai_conv))
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "--no-dashboard",
+            "run-all",
+            "--input",
+            str(dataset_dir),
+        ],
+    )
+    assert result.exit_code == 0
+
+    # Verify that separate output trees were created for each type
+    # Documents
+    assert (tmp_path / "_evidence_test_dataset_documents").exists()
+    assert (tmp_path / "_atoms_test_dataset_documents").exists()
+    assert (tmp_path / "output" / "test_dataset" / "documents" / "docs").exists()
+
+    # Meetings
+    assert (tmp_path / "_evidence_test_dataset_meetings").exists()
+    assert (tmp_path / "_atoms_test_dataset_meetings").exists()
+    assert (tmp_path / "output" / "test_dataset" / "meetings" / "docs").exists()
+
+    # AI
+    assert (tmp_path / "_evidence_test_dataset_ai").exists()
+    assert (tmp_path / "_atoms_test_dataset_ai").exists()
+    assert (tmp_path / "output" / "test_dataset" / "ai" / "docs").exists()
+
+    # Verify that at least one conversation folder exists in each evidence dir
+    # (actual content depends on parsing, but structure should be there)
+    doc_evidence_dirs = list((tmp_path / "_evidence_test_dataset_documents").iterdir())
+    meeting_evidence_dirs = list((tmp_path / "_evidence_test_dataset_meetings").iterdir())
+    ai_evidence_dirs = list((tmp_path / "_evidence_test_dataset_ai").iterdir())
+
+    # At least one conversation should have been processed
+    assert len(doc_evidence_dirs) > 0 or len(meeting_evidence_dirs) > 0 or len(ai_evidence_dirs) > 0
+
+
+def test_run_all_split_by_subdir_with_explicit_outputs(tmp_path: Path):
+    """Test that split-by-subdir creates typed subfolders under explicit output roots."""
+    # Create a dataset directory with typed subfolders
+    dataset_dir = tmp_path / "test_dataset"
+    dataset_dir.mkdir()
+
+    # Create documents subfolder with a minimal markdown file
+    documents_dir = dataset_dir / "documents"
+    documents_dir.mkdir()
+    (documents_dir / "test_doc.md").write_text("# Test Document\n\nThis is a test document.")
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "--no-dashboard",
+            "run-all",
+            "--input",
+            str(dataset_dir),
+            "--evidence",
+            str(tmp_path / "custom_evidence"),
+            "--atoms",
+            str(tmp_path / "custom_atoms"),
+            "--docs",
+            str(tmp_path / "custom_docs"),
+        ],
+    )
+    assert result.exit_code == 0
+
+    # Verify that typed subfolders were created under explicit roots
+    assert (tmp_path / "custom_evidence" / "documents").exists()
+    assert (tmp_path / "custom_atoms" / "documents").exists()
+    assert (tmp_path / "custom_docs" / "documents").exists()

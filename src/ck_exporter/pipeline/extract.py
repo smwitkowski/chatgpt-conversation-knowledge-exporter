@@ -1,5 +1,6 @@
 """Extraction pipeline orchestration."""
 
+import contextvars
 import os
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -12,10 +13,82 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 
 from ck_exporter.adapters.fs_jsonl import write_jsonl
 from ck_exporter.utils.chunking import chunk_messages
+from ck_exporter.config import get_chunk_max_concurrency, get_max_concurrency
 from ck_exporter.core.ports.atom_extractor import AtomExtractor
 from ck_exporter.logging import get_logger, should_show_progress, with_context
+from ck_exporter.observability.langsmith import traceable_call, tracing_context
+from ck_exporter.pipeline.action_items import extract_action_items_from_conversation
+from ck_exporter.pipeline.atom_converter import (
+    convert_action_items_to_universal,
+    convert_decisions_to_universal,
+    convert_facts_to_universal,
+    convert_open_questions_to_universal,
+)
 from ck_exporter.pipeline.io import get_conversation_id, get_title, load_conversations
 from ck_exporter.pipeline.linearize import linearize_conversation
+from ck_exporter.pipeline.meeting_metadata import extract_meeting_metadata, infer_meeting_kind
+
+
+def _extract_meeting_atoms_with_dspy(
+    conversation: dict[str, Any],
+    conversation_id: str,
+    linearized_content: str,
+    conv_logger: Any,
+) -> list[dict[str, Any]] | None:
+    """
+    Extract meeting atoms using DSPy (if available).
+
+    Returns list of universal atoms if successful, None if DSPy not available or extraction fails.
+    """
+    try:
+        from ck_exporter.adapters.dspy_lm import get_dspy_lm_for_meeting_extraction
+        from ck_exporter.programs.dspy.extract_meeting_atoms import (
+            create_extract_meeting_atoms_program,
+            extract_meeting_atoms_with_dspy,
+        )
+
+        # Try to get meeting metadata
+        # For now, we'll infer from conversation_id and content
+        # In a full implementation, we'd track the source file path
+        meeting_metadata = {
+            "source_system": "google_meet",
+            "meeting_title": get_title(conversation) or "Unknown Meeting",
+            "participants": [],
+            "links": {},
+        }
+
+        # Create DSPy LM and program
+        lm = get_dspy_lm_for_meeting_extraction(use_openrouter=True)
+        dspy_program = create_extract_meeting_atoms_program(lm)
+
+        # Extract atoms
+        result = extract_meeting_atoms_with_dspy(
+            conversation=conversation,
+            conversation_id=conversation_id,
+            meeting_metadata=meeting_metadata,
+            linearized_content=linearized_content,
+            dspy_program=dspy_program,
+        )
+
+        atoms = result.get("atoms", [])
+        if atoms:
+            # Ensure all atoms have conversation_id in evidence
+            for atom in atoms:
+                for ev in atom.get("evidence", []):
+                    if isinstance(ev, dict) and not ev.get("conversation_id"):
+                        ev["conversation_id"] = conversation_id
+
+        return atoms if atoms else None
+
+    except ImportError:
+        # DSPy not available
+        return None
+    except Exception as e:
+        conv_logger.warning(
+            "DSPy extraction error",
+            extra={"event": "extract.meeting.dspy.error", "error": str(e)},
+        )
+        return None
 
 logger = get_logger(__name__)
 
@@ -38,9 +111,9 @@ def format_chunk_for_extraction(messages: list[dict[str, Any]]) -> str:
 
 def _conversation_outputs_exist(conv_id: str, atoms_dir: Path) -> bool:
     """Check if final outputs already exist for a conversation."""
-    facts_path = atoms_dir / conv_id / "facts.jsonl"
-    # Consider it complete if at least facts.jsonl exists and is non-empty
-    return facts_path.exists() and facts_path.stat().st_size > 0
+    atoms_path = atoms_dir / conv_id / "atoms.jsonl"
+    # Consider it complete if atoms.jsonl exists and is non-empty
+    return atoms_path.exists() and atoms_path.stat().st_size > 0
 
 
 def extract_conversation(
@@ -81,6 +154,9 @@ def extract_conversation(
         )
         return
 
+    # Check if this is a meeting artifact (conversation_id starts with "meeting__")
+    is_meeting = conv_id.startswith("meeting__")
+
     # Load linearized messages
     evidence_path = evidence_dir / conv_id / "conversation.md"
     if not evidence_path.exists():
@@ -100,154 +176,226 @@ def extract_conversation(
         )
         return
 
-    # Chunk messages
-    chunks = chunk_messages(messages, max_tokens=max_chunk_tokens, model="gpt-4")
+    def _run_extract() -> None:
+        # For meetings, try DSPy extraction first
+        if is_meeting:
+            try:
+                # Try to get the source file path from conversation metadata or infer from conv_id
+                # For now, we'll use the linearized markdown content
+                linearized_content = (
+                    evidence_path.read_text(encoding="utf-8") if evidence_path.exists() else None
+                )
 
-    conv_logger.info(
-        "Processing conversation",
-        extra={
-            "event": "extract.conversation.start",
-            "num_chunks": len(chunks),
-            "num_messages": len(messages),
-        },
-    )
+                if linearized_content:
+                    # Try DSPy extraction (will fall through if DSPy not available)
+                    with tracing_context(
+                        conversation_id=conv_id,
+                        document_id=conv_id,
+                        step="extract_meeting_atoms",
+                    ):
+                        meeting_atoms = _extract_meeting_atoms_with_dspy(
+                            conversation, conv_id, linearized_content, conv_logger
+                        )
+                    if meeting_atoms:
+                        # Write DSPy-extracted atoms
+                        atoms_path = atoms_dir / conv_id / "atoms.jsonl"
+                        write_jsonl(atoms_path, meeting_atoms)
+                        conv_logger.info(
+                            "Meeting extraction complete (DSPy)",
+                            extra={
+                                "event": "extract.meeting.dspy.complete",
+                                "total_atoms": len(meeting_atoms),
+                                "atoms_file": str(atoms_path),
+                            },
+                        )
+                        return
+            except Exception as e:
+                conv_logger.warning(
+                    "DSPy meeting extraction failed, falling back to standard extraction",
+                    extra={
+                        "event": "extract.meeting.dspy.fallback",
+                        "error": str(e),
+                    },
+                )
+                # Fall through to standard extraction
 
-    # Pass 1: Extract candidates from each chunk (parallelized)
-    all_candidates = {"facts": [], "decisions": [], "open_questions": []}
+        # Chunk messages
+        chunks = chunk_messages(messages, max_tokens=max_chunk_tokens, model="gpt-4")
 
-    # Determine chunk concurrency (default: use env var or conservative default)
-    if chunk_max_concurrency is None:
-        chunk_max_concurrency = int(os.getenv("CKX_CHUNK_MAX_CONCURRENCY", "4"))
+        conv_logger.info(
+            "Processing conversation",
+            extra={
+                "event": "extract.conversation.start",
+                "num_chunks": len(chunks),
+                "num_messages": len(messages),
+            },
+        )
 
-    # For single chunk or very few chunks, use sequential processing
-    if len(chunks) <= 1 or chunk_max_concurrency <= 1:
-        for i, chunk in enumerate(chunks, 1):
-            chunk_text = format_chunk_for_extraction(chunk)
-            result = extractor.extract_from_chunk(chunk_text)
+        # Pass 1: Extract candidates from each chunk (parallelized)
+        all_candidates = {"facts": [], "decisions": [], "open_questions": []}
 
-            # Collect candidates
-            num_facts = len(result.get("facts", []))
-            num_decisions = len(result.get("decisions", []))
-            num_questions = len(result.get("open_questions", []))
-            all_candidates["facts"].extend(result.get("facts", []))
-            all_candidates["decisions"].extend(result.get("decisions", []))
-            all_candidates["open_questions"].extend(result.get("open_questions", []))
+        # Determine chunk concurrency (default: use config or conservative default)
+        nonlocal chunk_max_concurrency
+        if chunk_max_concurrency is None:
+            chunk_max_concurrency = get_chunk_max_concurrency()
 
-            conv_logger.debug(
-                "Pass 1 chunk extracted",
-                extra={
-                    "event": "extract.pass1.chunk",
-                    "chunk_num": i,
-                    "total_chunks": len(chunks),
-                    "facts": num_facts,
-                    "decisions": num_decisions,
-                    "questions": num_questions,
-                },
-            )
-    else:
-        # Parallel chunk extraction with deterministic ordering
-        chunk_results: list[tuple[int, dict[str, Any]]] = []
+        # For single chunk or very few chunks, use sequential processing
+        if len(chunks) <= 1 or chunk_max_concurrency <= 1:
+            for i, chunk in enumerate(chunks, 1):
+                chunk_text = format_chunk_for_extraction(chunk)
+                with tracing_context(
+                    conversation_id=conv_id,
+                    document_id=conv_id,
+                    step="extract_pass1",
+                    chunk_index=i,
+                    total_chunks=len(chunks),
+                ):
+                    result = extractor.extract_from_chunk(chunk_text)
 
-        def extract_chunk(idx_and_chunk: tuple[int, list[dict[str, Any]]]) -> tuple[int, dict[str, Any]]:
-            """Extract from a single chunk, returning (index, result) for ordering."""
-            idx, chunk = idx_and_chunk
-            chunk_text = format_chunk_for_extraction(chunk)
-            result = extractor.extract_from_chunk(chunk_text)
-            return (idx, result)
+                # Collect candidates
+                num_facts = len(result.get("facts", []))
+                num_decisions = len(result.get("decisions", []))
+                num_questions = len(result.get("open_questions", []))
+                all_candidates["facts"].extend(result.get("facts", []))
+                all_candidates["decisions"].extend(result.get("decisions", []))
+                all_candidates["open_questions"].extend(result.get("open_questions", []))
 
-        with ThreadPoolExecutor(max_workers=chunk_max_concurrency) as executor:
-            # Submit all chunks with their indices
-            futures = {
-                executor.submit(extract_chunk, (i, chunk)): i
-                for i, chunk in enumerate(chunks)
-            }
+                conv_logger.debug(
+                    "Pass 1 chunk extracted",
+                    extra={
+                        "event": "extract.pass1.chunk",
+                        "chunk_num": i,
+                        "total_chunks": len(chunks),
+                        "facts": num_facts,
+                        "decisions": num_decisions,
+                        "questions": num_questions,
+                    },
+                )
+        else:
+            # Parallel chunk extraction with deterministic ordering
+            chunk_results: list[tuple[int, dict[str, Any]]] = []
 
-            # Collect results as they complete
-            for future in as_completed(futures):
-                try:
-                    idx, result = future.result()
-                    chunk_results.append((idx, result))
+            def extract_chunk(idx_and_chunk: tuple[int, list[dict[str, Any]]]) -> tuple[int, dict[str, Any]]:
+                """Extract from a single chunk, returning (index, result) for ordering."""
+                idx, chunk = idx_and_chunk
+                chunk_text = format_chunk_for_extraction(chunk)
+                with tracing_context(
+                    conversation_id=conv_id,
+                    document_id=conv_id,
+                    step="extract_pass1",
+                    chunk_index=idx + 1,
+                    total_chunks=len(chunks),
+                ):
+                    result = extractor.extract_from_chunk(chunk_text)
+                return (idx, result)
 
-                    num_facts = len(result.get("facts", []))
-                    num_decisions = len(result.get("decisions", []))
-                    num_questions = len(result.get("open_questions", []))
+            with ThreadPoolExecutor(max_workers=chunk_max_concurrency) as executor:
+                # Submit all chunks with their indices (propagate contextvars for LangSmith nesting)
+                futures: dict[Any, int] = {}
+                for i, chunk in enumerate(chunks):
+                    ctx = contextvars.copy_context()
+                    future = executor.submit(ctx.run, extract_chunk, (i, chunk))
+                    futures[future] = i
 
-                    conv_logger.debug(
-                        "Pass 1 chunk extracted",
-                        extra={
-                            "event": "extract.pass1.chunk",
-                            "chunk_num": idx + 1,
-                            "total_chunks": len(chunks),
-                            "facts": num_facts,
-                            "decisions": num_decisions,
-                            "questions": num_questions,
-                        },
-                    )
-                except Exception as e:
-                    chunk_idx = futures[future]
-                    conv_logger.exception(
-                        "Error extracting chunk",
-                        extra={
-                            "event": "extract.pass1.chunk.error",
-                            "chunk_num": chunk_idx + 1,
-                            "total_chunks": len(chunks),
-                        },
-                    )
+                # Collect results as they complete
+                for future in as_completed(futures):
+                    try:
+                        idx, result = future.result()
+                        chunk_results.append((idx, result))
 
-        # Sort by index to maintain deterministic order, then aggregate
-        chunk_results.sort(key=lambda x: x[0])
-        for idx, result in chunk_results:
-            all_candidates["facts"].extend(result.get("facts", []))
-            all_candidates["decisions"].extend(result.get("decisions", []))
-            all_candidates["open_questions"].extend(result.get("open_questions", []))
+                        num_facts = len(result.get("facts", []))
+                        num_decisions = len(result.get("decisions", []))
+                        num_questions = len(result.get("open_questions", []))
 
-    # Pass 2: Refine and consolidate all candidates
-    conv_logger.info(
-        "Pass 2: Refining candidates",
-        extra={
-            "event": "extract.pass2.start",
-            "candidate_facts": len(all_candidates["facts"]),
-            "candidate_decisions": len(all_candidates["decisions"]),
-            "candidate_questions": len(all_candidates["open_questions"]),
-        },
-    )
-    conversation_title = get_title(conversation)
-    refined = extractor.refine_atoms(all_candidates, conv_id, conversation_title)
+                        conv_logger.debug(
+                            "Pass 1 chunk extracted",
+                            extra={
+                                "event": "extract.pass1.chunk",
+                                "chunk_num": idx + 1,
+                                "total_chunks": len(chunks),
+                                "facts": num_facts,
+                                "decisions": num_decisions,
+                                "questions": num_questions,
+                            },
+                        )
+                    except Exception as e:
+                        chunk_idx = futures[future]
+                        conv_logger.exception(
+                            "Error extracting chunk",
+                            extra={
+                                "event": "extract.pass1.chunk.error",
+                                "chunk_num": chunk_idx + 1,
+                                "total_chunks": len(chunks),
+                            },
+                        )
 
-    final_facts = refined.get("facts", [])
-    final_decisions = refined.get("decisions", [])
-    final_questions = refined.get("open_questions", [])
+            # Sort by index to maintain deterministic order, then aggregate
+            chunk_results.sort(key=lambda x: x[0])
+            for idx, result in chunk_results:
+                all_candidates["facts"].extend(result.get("facts", []))
+                all_candidates["decisions"].extend(result.get("decisions", []))
+                all_candidates["open_questions"].extend(result.get("open_questions", []))
 
-    conv_logger.info(
-        "Pass 2: Refinement complete",
-        extra={
-            "event": "extract.pass2.complete",
-            "final_facts": len(final_facts),
-            "final_decisions": len(final_decisions),
-            "final_questions": len(final_questions),
-        },
-    )
+        # Pass 2: Refine and consolidate all candidates
+        conv_logger.info(
+            "Pass 2: Refining candidates",
+            extra={
+                "event": "extract.pass2.start",
+                "candidate_facts": len(all_candidates["facts"]),
+                "candidate_decisions": len(all_candidates["decisions"]),
+                "candidate_questions": len(all_candidates["open_questions"]),
+            },
+        )
+        conversation_title = get_title(conversation)
+        with tracing_context(conversation_id=conv_id, document_id=conv_id, step="refine_atoms"):
+            refined = extractor.refine_atoms(all_candidates, conv_id, conversation_title)
 
-    # Write final JSONL files
-    facts_path = atoms_dir / conv_id / "facts.jsonl"
-    decisions_path = atoms_dir / conv_id / "decisions.jsonl"
-    questions_path = atoms_dir / conv_id / "open_questions.jsonl"
+        final_facts = refined.get("facts", [])
+        final_decisions = refined.get("decisions", [])
+        final_questions = refined.get("open_questions", [])
 
-    if final_facts:
-        write_jsonl(facts_path, final_facts)
-    if final_decisions:
-        write_jsonl(decisions_path, final_decisions)
-    if final_questions:
-        write_jsonl(questions_path, final_questions)
+        conv_logger.info(
+            "Pass 2: Refinement complete",
+            extra={
+                "event": "extract.pass2.complete",
+                "final_facts": len(final_facts),
+                "final_decisions": len(final_decisions),
+                "final_questions": len(final_questions),
+            },
+        )
 
-    conv_logger.info(
-        "Extraction complete",
-        extra={
-            "event": "extract.conversation.complete",
-            "facts": len(final_facts),
-            "decisions": len(final_decisions),
-            "questions": len(final_questions),
-        },
+        # Extract action items deterministically (for meeting notes)
+        # TODO: This will be replaced by DSPy meeting extraction, but keeping for now as fallback
+        action_items_legacy = extract_action_items_from_conversation(conversation, conv_id)
+
+        # Convert all atoms to Universal Atom format
+        all_universal_atoms = []
+        all_universal_atoms.extend(convert_facts_to_universal(final_facts, conv_id))
+        all_universal_atoms.extend(convert_decisions_to_universal(final_decisions, conv_id))
+        all_universal_atoms.extend(convert_open_questions_to_universal(final_questions, conv_id))
+        all_universal_atoms.extend(convert_action_items_to_universal(action_items_legacy, conv_id))
+
+        # Write universal atoms.jsonl (single file per conversation)
+        atoms_path = atoms_dir / conv_id / "atoms.jsonl"
+        if all_universal_atoms:
+            write_jsonl(atoms_path, all_universal_atoms)
+
+        conv_logger.info(
+            "Extraction complete",
+            extra={
+                "event": "extract.conversation.complete",
+                "total_universal_atoms": len(all_universal_atoms),
+                "atoms_file": str(atoms_path),
+            },
+        )
+
+    # Root run for LangSmith waterfall (children include pass1/pass2 LLM calls)
+    traceable_call(
+        _run_extract,
+        name="extract_conversation",
+        run_type="chain",
+        metadata={"conversation_id": conv_id, "document_id": conv_id, "step": "extract_conversation"},
+        tags=["extract", "conversation"],
     )
 
 
@@ -256,11 +404,12 @@ def extract_export(
     evidence_dir: Path,
     atoms_dir: Path,
     extractor: AtomExtractor,
-    max_concurrency: int = 8,
+    max_concurrency: int | None = None,
     skip_existing: bool = True,
     conversation_id: Optional[str] = None,
     limit: Optional[int] = None,
     progress_cb: Optional[Callable[[int, int, Optional[dict]], None]] = None,
+    non_json_kind: str = "meeting",
 ) -> None:
     """
     Process export(s) and extract atoms for all conversations.
@@ -275,17 +424,23 @@ def extract_export(
         conversation_id: Optional filter to single conversation ID
         limit: Optional limit on number of conversations to process
         progress_cb: Optional callback(completed, total, context) for progress updates
+        non_json_kind: How to interpret non-JSON files ("meeting" or "document")
     """
+    # Set max_concurrency from config if not provided
+    if max_concurrency is None:
+        max_concurrency = get_max_concurrency()
+
     logger.info(
         "Loading export",
         extra={
             "event": "extract.export.load",
             "input_path": str(input_path),
             "limit": limit,
+            "non_json_kind": non_json_kind,
         },
     )
 
-    conversations = load_conversations(input_path, limit=limit)
+    conversations = load_conversations(input_path, limit=limit, non_json_kind=non_json_kind)
 
     # Filter to single conversation if requested
     if conversation_id:

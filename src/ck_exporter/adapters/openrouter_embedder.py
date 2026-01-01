@@ -11,6 +11,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 from ck_exporter.adapters.openrouter_client import make_openrouter_client
 from ck_exporter.utils.chunking import chunk_text
 from ck_exporter.core.ports.embedder import Embedder
+from ck_exporter.observability.langsmith import get_tracing_metadata
 
 # Pooling version for cache invalidation
 POOLING_VERSION = "v1"
@@ -51,10 +52,27 @@ class OpenRouterEmbedder:
             return np.array([])
 
         try:
-            response = self._client.embeddings.create(
-                model=self.model,
-                input=texts,
-            )
+            # Add LangSmith metadata if available
+            kwargs = {
+                "model": self.model,
+                "input": texts,
+            }
+            metadata = get_tracing_metadata()
+            if metadata:
+                step = metadata.get("step")
+                run_name = None
+                if step:
+                    run_name = f"{step}"
+                    if "conversation_id" in metadata:
+                        run_name += f" ({metadata['conversation_id']})"
+                extra: dict[str, object] = {"metadata": metadata}
+                if step:
+                    extra["tags"] = [str(step)]
+                if run_name:
+                    extra["run_name"] = run_name
+                kwargs["langsmith_extra"] = extra
+
+            response = self._client.embeddings.create(**kwargs)
 
             embeddings = [item.embedding for item in response.data]
             return np.array(embeddings)

@@ -267,3 +267,4 @@ def test_load_conversations_claude_skips_missing_uuid():
     assert result["mapping"]["msg-3"]["parent"] == "msg-1"
     assert result["current_node"] == "msg-3"
 
+

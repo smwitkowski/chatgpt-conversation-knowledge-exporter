@@ -6,6 +6,8 @@ from typing import Optional
 from dotenv import load_dotenv
 from openai import OpenAI
 
+from ck_exporter.observability.langsmith import maybe_wrap_openai_client
+
 load_dotenv()
 
 
@@ -33,13 +35,15 @@ def make_openrouter_client(use_openrouter: bool = True) -> OpenAI:
         if x_title:
             extra_headers["X-Title"] = x_title
 
-        return OpenAI(
+        client = OpenAI(
             base_url="https://openrouter.ai/api/v1",
             api_key=api_key,
             default_headers=extra_headers if extra_headers else None,
         )
+        return maybe_wrap_openai_client(client)
     else:
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
             raise ValueError("OPENAI_API_KEY must be set in environment")
-        return OpenAI(api_key=api_key)
+        client = OpenAI(api_key=api_key)
+        return maybe_wrap_openai_client(client)
