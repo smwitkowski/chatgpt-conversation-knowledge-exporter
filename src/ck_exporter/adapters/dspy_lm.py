@@ -5,16 +5,19 @@ from typing import Optional
 
 from dotenv import load_dotenv
 
+from ck_exporter.config import get_dspy_max_tokens
+
 load_dotenv()
 
 
-def configure_dspy_lm(model: str, use_openrouter: bool = True):
+def configure_dspy_lm(model: str, use_openrouter: bool = True, max_tokens: int | None = None):
     """
     Configure DSPy language model for OpenRouter.
 
     Args:
         model: Model identifier (e.g., "z-ai/glm-4.7")
         use_openrouter: If True, use OpenRouter API; otherwise use standard OpenAI
+        max_tokens: Optional maximum tokens to generate (default None = no cap)
 
     Returns:
         Configured DSPy LM instance
@@ -54,18 +57,24 @@ def configure_dspy_lm(model: str, use_openrouter: bool = True):
             dspy_model = model
 
         # Create DSPy LM with OpenRouter
-        lm = dspy.LM(
-            model=dspy_model,
-            api_key=api_key,
-            api_base=base_url,
-            extra_headers=extra_headers if extra_headers else None,
-        )
+        lm_kwargs = {
+            "model": dspy_model,
+            "api_key": api_key,
+            "api_base": base_url,
+            "extra_headers": extra_headers if extra_headers else None,
+        }
+        if max_tokens is not None:
+            lm_kwargs["max_tokens"] = max_tokens
+        lm = dspy.LM(**lm_kwargs)
     else:
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
             raise ValueError("OPENAI_API_KEY must be set in environment")
 
-        lm = dspy.LM(model=model, api_key=api_key)
+        lm_kwargs = {"model": model, "api_key": api_key}
+        if max_tokens is not None:
+            lm_kwargs["max_tokens"] = max_tokens
+        lm = dspy.LM(**lm_kwargs)
 
     return lm
 
@@ -81,7 +90,11 @@ def get_dspy_lm_for_labeling(use_openrouter: bool = True) -> "dspy.LM":
         Configured DSPy LM instance
     """
     model = os.getenv("CKX_DSPY_LABEL_MODEL", "z-ai/glm-4.7")
-    return configure_dspy_lm(model, use_openrouter=use_openrouter)
+    return configure_dspy_lm(
+        model,
+        use_openrouter=use_openrouter,
+        max_tokens=get_dspy_max_tokens("TOPIC_LABEL"),
+    )
 
 
 def get_dspy_lm_for_refinement(use_openrouter: bool = True) -> "dspy.LM":
@@ -95,4 +108,29 @@ def get_dspy_lm_for_refinement(use_openrouter: bool = True) -> "dspy.LM":
         Configured DSPy LM instance
     """
     model = os.getenv("CKX_DSPY_REFINE_MODEL", "z-ai/glm-4.7")
-    return configure_dspy_lm(model, use_openrouter=use_openrouter)
+    return configure_dspy_lm(
+        model,
+        use_openrouter=use_openrouter,
+        max_tokens=get_dspy_max_tokens("REFINE_ATOMS"),
+    )
+
+
+def get_dspy_lm_for_meeting_extraction(use_openrouter: bool = True) -> "dspy.LM":
+    """
+    Get DSPy LM configured for meeting atom extraction.
+
+    Args:
+        use_openrouter: Whether to use OpenRouter
+
+    Returns:
+        Configured DSPy LM instance
+    """
+    model = os.getenv(
+        "CKX_DSPY_MEETING_EXTRACT_MODEL",
+        os.getenv("CKX_DSPY_REFINE_MODEL", "z-ai/glm-4.7"),
+    )
+    return configure_dspy_lm(
+        model,
+        use_openrouter=use_openrouter,
+        max_tokens=get_dspy_max_tokens("MEETING_EXTRACT"),
+    )

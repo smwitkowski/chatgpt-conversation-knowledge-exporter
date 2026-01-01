@@ -3,6 +3,7 @@
 import json
 from typing import Any
 
+from ck_exporter.config import get_llm_max_tokens
 from ck_exporter.core.ports.atom_extractor import AtomExtractor
 from ck_exporter.core.ports.llm import LLMClient
 from ck_exporter.logging import get_logger
@@ -61,6 +62,7 @@ class OpenRouterAtomExtractor:
                     user=prompt,
                     temperature=0.3,
                     json_object=True,
+                    max_tokens=get_llm_max_tokens("EXTRACT_PASS1"),
                 )
             except Exception as e:
                 # If json_object is not supported (e.g., 400 Bad Request), retry without it
@@ -76,6 +78,7 @@ class OpenRouterAtomExtractor:
                         user=prompt,
                         temperature=0.3,
                         json_object=False,
+                        max_tokens=get_llm_max_tokens("EXTRACT_PASS1"),
                     )
                 else:
                     # Re-raise if it's a different error
@@ -112,6 +115,7 @@ class OpenRouterAtomExtractor:
                 system="You are a JSON repair assistant. Extract and return ONLY valid JSON, no other text.",
                 user=f"Repair this JSON output to be valid:\n\n{content}",
                 temperature=0.1,
+                max_tokens=get_llm_max_tokens("EXTRACT_PASS1_REPAIR"),
             )
             if repair_content:
                 result = extract_json_from_text(repair_content) or json.loads(repair_content)
@@ -176,6 +180,7 @@ class OpenRouterAtomExtractor:
                 user=prompt,
                 temperature=0.2,
                 json_object=True,
+                max_tokens=get_llm_max_tokens("EXTRACT_PASS2"),
             )
 
             if not content:
@@ -188,7 +193,24 @@ class OpenRouterAtomExtractor:
                 )
                 return all_candidates
 
-            result = json.loads(content)
+            # Try parsing JSON directly first
+            result = None
+            try:
+                result = json.loads(content)
+            except json.JSONDecodeError:
+                # Try extracting from markdown code blocks
+                result = extract_json_from_text(content)
+                if result is None:
+                    logger.warning(
+                        "Failed to parse JSON from refinement response, using candidates as-is",
+                        extra={
+                            "event": "extractor.pass2.json_parse_failed",
+                            "conversation_id": conversation_id,
+                            "response_preview": content[:200] if content else None,
+                        },
+                    )
+                    return all_candidates
+
             if not isinstance(result, dict):
                 logger.warning(
                     "Invalid response format, using candidates as-is",

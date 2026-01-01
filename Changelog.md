@@ -8,6 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Per-step token limits (max_tokens)**: Configurable per-step output token caps for LLM generation via environment variables. Set `CKX_LLM_MAX_TOKENS_<STEP>` for OpenRouter/OpenAI calls (e.g., `CKX_LLM_MAX_TOKENS_TOPIC_LABEL=300`, `CKX_LLM_MAX_TOKENS_EXTRACT_PASS1=1200`) or `CKX_DSPY_MAX_TOKENS_<STEP>` for DSPy calls (e.g., `CKX_DSPY_MAX_TOKENS_REFINE_ATOMS=1600`). Use `CKX_LLM_MAX_TOKENS_DEFAULT` or `CKX_DSPY_MAX_TOKENS_DEFAULT` for global defaults. If unset, no cap is applied (backward compatible).
+- **Document input mode**: New `--input-kind document` option for processing generic Markdown (`.md`) and Word (`.docx`) documents. Documents are split by headings into sections and processed through the same extraction pipeline as conversations. Document IDs are prefixed `doc__...` to distinguish from meetings. Use `--input-kind document` when processing a directory of documents (e.g., `ckx run-all --input _sources/documents --input-kind document`).
+- **Auto-derived output directories for `run-all` command**: When processing a directory input (e.g., `_sources/Schreiber`), the `run-all` command now automatically derives dedicated output directories from the directory name (`_evidence_schreiber`, `_atoms_schreiber`, `output/schreiber/docs`). Output directories can still be explicitly specified via `--evidence`, `--atoms`, and `--docs` options.
+
+### Fixed
+- **JSON parsing error in refinement step**: The `refine_atoms` method now uses robust JSON extraction that handles responses wrapped in markdown code blocks, matching the behavior of the extraction step. This prevents JSON parsing errors when LLMs return formatted responses even with `json_object=True`.
+- **AttributeError in action items extraction**: Fixed `extract_action_items_from_conversation` to handle cases where conversation nodes have `message` field set to `None` instead of a dict. The function now skips nodes with missing or invalid message data instead of crashing.
+- **Centralized configuration with .env file support**: Concurrency settings (`CKX_MAX_CONCURRENCY`, `CKX_CHUNK_MAX_CONCURRENCY`, `CKX_LLM_MAX_INFLIGHT`) can now be configured in a `.env` file. The config module automatically loads `.env` files and provides typed access to these settings.
+- **`.env.example` file**: Template file documenting all available environment variables including concurrency settings, model selection, and logging configuration.
+- **Parallelized topic operations**: Topic assignment and topic labeling now process conversations and topics in parallel using `ThreadPoolExecutor`, significantly improving performance for large datasets. Controlled via `CKX_MAX_CONCURRENCY`.
+- **LangSmith tracing for topic operations**: Topic discovery, assignment, and labeling operations are now wrapped with LangSmith tracing for full observability. Individual topic and conversation processing includes metadata like `topic_id` and `conversation_id`.
+- **LangSmith tracing support**: Enable with `LANGSMITH_TRACING=true` to trace all LLM calls (OpenRouter/OpenAI + DSPy) and embedding requests. Install with `uv sync --extra observability`
+- **LangSmith trace metadata + waterfalls**: Traces now include IDs like `conversation_id`, `document_id`, `topic_id`, and a `step` field. Each conversation extract is grouped under a parent run for full waterfall visibility.
+- Meeting artifact ingestion: `--input` now accepts `.md` and `.txt` files (Google Meet notes, Teams transcripts)
+- Stable document IDs for meeting artifacts (`meeting__<slug>__<hash8>`)
+- Timestamp normalization for transcript message IDs (`HH:MM:SS` format)
 - **Human-readable CLI logging**: New `--log-mode` option with `human`, `hybrid`, `machine`, and `auto` modes for optimized logging based on use case (interactive development vs CI/CD)
 - **Hybrid logging mode**: Rich console output for human readability + structured JSON logs to file for programmatic analysis
 - **Automatic mode detection**: `--log-mode auto` (default) automatically selects appropriate mode based on TTY detection and `--log-file` presence

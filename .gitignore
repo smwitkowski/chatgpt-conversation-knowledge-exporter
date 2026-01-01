@@ -56,6 +56,7 @@ htmlcov/
 # Project-specific generated artifacts
 _atoms/
 _evidence/
+project/docs/
 *.xml
 chatgpt-export.json
 
@@ -64,6 +65,16 @@ data/
 output/
 all_conversations.json
 *.zip
+
+# Source files (keep scaffolding READMEs but ignore actual content)
+_sources/ai_conversations/*
+!_sources/ai_conversations/README.md
+_sources/meeting_artifacts/*
+!_sources/meeting_artifacts/README.md
+
+# Example files (not for production)
+_EXAMPLE*.md
+_EXAMPLE*.txt
 
 # OS
 .DS_Store

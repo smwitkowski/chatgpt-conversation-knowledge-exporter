@@ -5,6 +5,7 @@ from typing import Any
 
 from ck_exporter.adapters.dspy_lm import get_dspy_lm_for_refinement
 from ck_exporter.logging import get_logger
+from ck_exporter.observability.langsmith import tracing_context
 from ck_exporter.programs.dspy.refine_atoms import create_refine_atoms_program
 
 logger = get_logger(__name__)
@@ -54,12 +55,13 @@ class DspyAtomRefiner:
         candidates_json = json.dumps(all_candidates, ensure_ascii=False, indent=2)
 
         try:
-            # Call DSPy program
-            result = self.program(
-                conversation_id=conversation_id,
-                conversation_title=conversation_title or "Unknown",
-                candidates_json=candidates_json,
-            )
+            # Call DSPy program with tracing context
+            with tracing_context(conversation_id=conversation_id, step="refine_atoms"):
+                result = self.program(
+                    conversation_id=conversation_id,
+                    conversation_title=conversation_title or "Unknown",
+                    candidates_json=candidates_json,
+                )
 
             # Parse JSON outputs
             facts_json = result.get("facts_json", "[]")

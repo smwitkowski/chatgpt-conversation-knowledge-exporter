@@ -38,15 +38,13 @@ def discover_topics_command(
         raise typer.Exit(1)
 
     atoms_path = atoms / "atoms.jsonl" if atoms.is_dir() else atoms
-    decisions_path = atoms / "decisions.jsonl" if atoms.is_dir() else atoms.parent / "decisions.jsonl"
-    questions_path = atoms / "open_questions.jsonl" if atoms.is_dir() else atoms.parent / "open_questions.jsonl"
 
     if not atoms_path.exists():
         console.print(f"[red]Atoms file not found: {atoms_path}[/red]")
         raise typer.Exit(1)
 
     console.print("[bold]Building conversation documents...[/bold]")
-    documents, titles = build_conversation_documents(input, atoms_path, decisions_path, questions_path, limit=limit)
+    documents, titles = build_conversation_documents(input, atoms_path, limit=limit)
 
     if not documents:
         console.print("[red]No conversations found[/red]")
@@ -144,8 +142,6 @@ def assign_topics_command(
         raise typer.Exit(1)
 
     atoms_path = atoms / "atoms.jsonl" if atoms.is_dir() else atoms
-    decisions_path = atoms / "decisions.jsonl" if atoms.is_dir() else atoms.parent / "decisions.jsonl"
-    questions_path = atoms / "open_questions.jsonl" if atoms.is_dir() else atoms.parent / "open_questions.jsonl"
 
     if not atoms_path.exists():
         console.print(f"[red]Atoms file not found: {atoms_path}[/red]")
@@ -161,8 +157,6 @@ def assign_topics_command(
     assignments = assign_topics(
         input,
         atoms_path,
-        decisions_path,
-        questions_path,
         topic_registry,
         embedding_model=embedding_model,
         primary_threshold=primary_threshold,

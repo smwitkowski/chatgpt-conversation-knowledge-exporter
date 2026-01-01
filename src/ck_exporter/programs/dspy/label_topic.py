@@ -41,8 +41,9 @@ def create_label_topic_program(lm: "dspy.LM") -> "dspy.Module":
     if dspy is None:
         raise ImportError("dspy-ai is not installed. Install it with: uv sync --extra dspy")
 
-    # Set the LM
-    dspy.configure(lm=lm)
+    # Set the LM with LangSmith tracing if enabled
+    from ck_exporter.observability.langsmith import configure_dspy_with_langsmith
+    configure_dspy_with_langsmith(lm)
 
     # Create a simple chain-of-thought program
     class LabelTopicProgram(dspy.Module):

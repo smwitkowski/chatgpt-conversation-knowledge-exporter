@@ -124,6 +124,7 @@ def linearize_export(
     output_dir: Path,
     limit: Optional[int] = None,
     progress_cb: Optional[Callable[[int, int, Optional[dict]], None]] = None,
+    non_json_kind: str = "meeting",
 ) -> None:
     """
     Process ChatGPT/Claude exports (or per-conversation directories) and write linearized conversations.
@@ -132,12 +133,14 @@ def linearize_export(
     - A top-level list of conversations (standard export format)
     - A single conversation object with mapping/current_node
     - A directory containing many per-conversation `.json` files
+    - A directory containing `.md`/`.docx` files (when non_json_kind="document")
 
     Args:
         input_path: Path to JSON file or directory containing JSON files
         output_dir: Output directory for linearized markdown files
         limit: Optional limit on number of conversations to process
         progress_cb: Optional callback(completed, total, context) for progress updates
+        non_json_kind: How to interpret non-JSON files ("meeting" or "document")
     """
     logger.info(
         "Loading export",
@@ -145,10 +148,11 @@ def linearize_export(
             "event": "linearize.export.load",
             "input_path": str(input_path),
             "limit": limit,
+            "non_json_kind": non_json_kind,
         },
     )
 
-    conversations = load_conversations(input_path, limit=limit)
+    conversations = load_conversations(input_path, limit=limit, non_json_kind=non_json_kind)
 
     logger.info(
         "Found conversations",

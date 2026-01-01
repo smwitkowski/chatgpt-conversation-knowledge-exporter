@@ -69,24 +69,23 @@ class ZipBundler:
                     arc_name = f"atoms/{jsonl_file.name}"
                     zip_file.write(jsonl_file, arc_name)
             elif "atoms_consolidated" in paths:
-                # Slice from consolidated files
+                # Slice from consolidated universal atoms.jsonl
                 consolidated_dir = paths["atoms_consolidated"]
-                for file_name in ["atoms.jsonl", "decisions.jsonl", "open_questions.jsonl"]:
-                    source_file = consolidated_dir / file_name
-                    if source_file.exists():
-                        # Filter by conversation_id
-                        filtered_lines = []
-                        with source_file.open("r", encoding="utf-8") as f:
-                            for line in f:
-                                line = line.strip()
-                                if not line:
-                                    continue
-                                try:
-                                    obj = json.loads(line)
-                                    if obj.get("source_conversation_id") == conversation_id:
-                                        filtered_lines.append(line)
-                                except json.JSONDecodeError:
-                                    continue
+                source_file = consolidated_dir / "atoms.jsonl"
+                if source_file.exists():
+                    # Filter by conversation_id
+                    filtered_lines = []
+                    with source_file.open("r", encoding="utf-8") as f:
+                        for line in f:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                obj = json.loads(line)
+                                if obj.get("source_conversation_id") == conversation_id:
+                                    filtered_lines.append(line)
+                            except json.JSONDecodeError:
+                                continue
                         if filtered_lines:
                             arc_name = f"atoms/{file_name}"
                             zip_file.writestr(arc_name, "\n".join(filtered_lines) + "\n")

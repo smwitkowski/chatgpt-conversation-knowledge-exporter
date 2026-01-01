@@ -5,12 +5,27 @@ Supports:
 - Single conversation format: top-level dict with mapping/current_node
 - Claude export format: top-level dict with platform="CLAUDE_AI" and chat_messages[]
 - Directory inputs: a folder containing many per-conversation JSON files (e.g. chatgpt-conversations/)
+- Meeting artifacts: Markdown (.md) and plain text (.txt) meeting notes and transcripts
+- Documents: Markdown (.md) and Word (.docx) documents (when non_json_kind="document")
 """
 
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, List, Literal, Optional
+
+from ck_exporter.logging import get_logger
+from ck_exporter.pipeline.io.documents import parse_docx_document, parse_markdown_document
+from ck_exporter.pipeline.io.meeting_notes import (
+    is_meeting_artifact,
+    parse_docx_meeting,
+    parse_markdown_meeting,
+    parse_text_transcript,
+)
+
+logger = get_logger(__name__)
+
+NonJsonKind = Literal["meeting", "document"]
 
 
 def is_chatgpt_single_conversation(obj: Any) -> bool:
@@ -140,12 +155,36 @@ def convert_claude_to_chatgpt(claude_conv: dict) -> dict:
     }
 
 
+def _list_input_files(input_dir: Path) -> list[Path]:
+    """
+    List input files in a directory (recursively), sorted for determinism.
+
+    Supports JSON, Markdown (.md), text (.txt), and Word document (.docx) files.
+    This is used to support inputs like `chatgpt-conversations/` or `meeting_artifacts/`.
+
+    Returns:
+        Sorted list of file paths
+    """
+    # Collect all supported file types
+    all_files = []
+    # Prefer direct children first (common case), then fall back to recursive search.
+    for ext in [".json", ".md", ".txt", ".docx"]:
+        direct = sorted(p for p in input_dir.glob(f"*{ext}") if p.is_file())
+        if direct:
+            all_files.extend(direct)
+        else:
+            all_files.extend(sorted(p for p in input_dir.rglob(f"*{ext}") if p.is_file()))
+    
+    # Sort all files together for deterministic ordering
+    return sorted(set(all_files))
+
+
 def _list_json_files(input_dir: Path) -> list[Path]:
     """
     List JSON files in a directory (recursively), sorted for determinism.
 
-    This is used to support inputs like `chatgpt-conversations/` which contain one
-    JSON file per conversation.
+    This is a legacy function kept for backward compatibility.
+    Use _list_input_files() for new code that needs to support multiple file types.
     """
     # Prefer direct children first (common case), then fall back to recursive search.
     direct = sorted(p for p in input_dir.glob("*.json") if p.is_file())
@@ -154,22 +193,62 @@ def _list_json_files(input_dir: Path) -> list[Path]:
     return sorted(p for p in input_dir.rglob("*.json") if p.is_file())
 
 
-def _load_conversations_file(input_path: Path) -> List[dict]:
+def _load_conversations_file(input_path: Path, *, non_json_kind: NonJsonKind = "meeting") -> List[dict]:
     """
-    Load and normalize conversations from a single JSON file.
-
-    Load and normalize conversations from JSON file.
+    Load and normalize conversations from a single file.
 
     Supports:
-    - List of conversations (standard ChatGPT export format)
-    - Single ChatGPT conversation dict (with mapping/current_node)
-    - Claude conversation export (with platform="CLAUDE_AI" and chat_messages[])
+    - JSON files:
+      - List of conversations (standard ChatGPT export format)
+      - Single ChatGPT conversation dict (with mapping/current_node)
+      - Claude conversation export (with platform="CLAUDE_AI" and chat_messages[])
+    - Markdown files (.md): Meeting notes with notes and transcript sections (meeting mode)
+                           or generic documents split by headings (document mode)
+    - Text files (.txt): Plain text transcripts with timestamped lines (meeting mode only)
+    - Word documents (.docx): Meeting notes (meeting mode) or generic documents (document mode)
 
     For single ChatGPT conversations missing id/conversation_id, injects conversation_id
     based on filename stem.
 
+    Args:
+        input_path: Path to file to load
+        non_json_kind: How to interpret non-JSON files ("meeting" or "document")
+
     Raises ValueError if input format is not recognized.
     """
+    # Handle non-JSON files (Markdown, text, and Word document files)
+    if is_meeting_artifact(input_path):
+        suffix = input_path.suffix.lower()
+
+        if non_json_kind == "meeting":
+            if suffix == ".md":
+                return [parse_markdown_meeting(input_path)]
+            elif suffix == ".txt":
+                return [parse_text_transcript(input_path)]
+            elif suffix == ".docx":
+                return [parse_docx_meeting(input_path)]
+            else:
+                raise ValueError(f"Unsupported meeting artifact format: {input_path.suffix}")
+
+        elif non_json_kind == "document":
+            if suffix == ".md":
+                return [parse_markdown_document(input_path)]
+            elif suffix == ".docx":
+                return [parse_docx_document(input_path)]
+            elif suffix == ".txt":
+                # Skip .txt files in document mode (not supported)
+                logger.warning(
+                    "Skipping .txt file in document mode (not supported)",
+                    extra={"event": "load.document.skip_txt", "file": str(input_path)},
+                )
+                raise ValueError(f"Unsupported document format in document mode: {input_path.suffix}")
+            else:
+                raise ValueError(f"Unsupported document format in document mode: {input_path.suffix}")
+
+        else:
+            raise ValueError(f"Unknown non_json_kind: {non_json_kind}")
+
+    # Handle JSON files (existing logic)
     with open(input_path, "r", encoding="utf-8") as f:
         data = json.load(f)
 
@@ -222,42 +301,53 @@ def _load_conversations_file(input_path: Path) -> List[dict]:
     )
 
 
-def load_conversations(input_path: Path, limit: Optional[int] = None) -> List[dict]:
+def load_conversations(
+    input_path: Path, limit: Optional[int] = None, *, non_json_kind: NonJsonKind = "meeting"
+) -> List[dict]:
     """
-    Load and normalize conversations from a JSON file OR directory.
+    Load and normalize conversations from a file OR directory.
 
     Supports:
-    - List of conversations (standard ChatGPT export format)
-    - Single ChatGPT conversation dict (with mapping/current_node)
-    - Claude conversation export (with platform="CLAUDE_AI" and chat_messages[])
-    - A directory containing many `.json` files, each containing any of the above
-      (common for per-conversation exports like `chatgpt-conversations/`)
+    - JSON files:
+      - List of conversations (standard ChatGPT export format)
+      - Single ChatGPT conversation dict (with mapping/current_node)
+      - Claude conversation export (with platform="CLAUDE_AI" and chat_messages[])
+    - Markdown files (.md): Meeting notes with notes and transcript sections (meeting mode)
+                           or generic documents split by headings (document mode)
+    - Text files (.txt): Plain text transcripts with timestamped lines (meeting mode only)
+    - Word documents (.docx): Meeting notes (meeting mode) or generic documents (document mode)
+    - A directory containing many files of the above types
+      (common for per-conversation exports like `chatgpt-conversations/` or `meeting_artifacts/`)
 
     For single ChatGPT conversations missing id/conversation_id, injects conversation_id
     based on filename stem.
 
     Args:
-        input_path: Path to JSON file or directory containing JSON files
+        input_path: Path to file or directory containing supported files
         limit: Optional limit on number of conversations to return. For directories,
                selects first N files by sorted filename (deterministic). For list exports,
                returns first N conversations after normalization.
+        non_json_kind: How to interpret non-JSON files ("meeting" or "document").
+                       Only applies when input_path is a directory containing non-JSON files.
 
-    Raises ValueError if input format is not recognized.
+    Raises ValueError if input format is not recognized or no supported files found.
     """
     if input_path.is_dir():
-        json_files = _list_json_files(input_path)
-        if not json_files:
-            raise ValueError(f"No .json files found in directory: {input_path}")
+        input_files = _list_input_files(input_path)
+        if not input_files:
+            raise ValueError(
+                f"No supported files (.json, .md, .txt, .docx) found in directory: {input_path}"
+            )
 
         conversations: List[dict] = []
-        for p in json_files:
+        for p in input_files:
             # Stop if we've reached the limit
             if limit is not None and len(conversations) >= limit:
                 break
 
             # Be liberal in what we accept: skip files that aren't a supported conversation format.
             try:
-                file_conversations = _load_conversations_file(p)
+                file_conversations = _load_conversations_file(p, non_json_kind=non_json_kind)
                 conversations.extend(file_conversations)
 
                 # If limit is set and we've exceeded it, trim to limit
@@ -269,7 +359,8 @@ def load_conversations(input_path: Path, limit: Optional[int] = None) -> List[di
         return conversations
 
     # For single file inputs, load and optionally limit
-    conversations = _load_conversations_file(input_path)
+    # Note: non_json_kind is only used for directory inputs, but we pass it through for consistency
+    conversations = _load_conversations_file(input_path, non_json_kind=non_json_kind)
     if limit is not None:
         return conversations[:limit]
     return conversations

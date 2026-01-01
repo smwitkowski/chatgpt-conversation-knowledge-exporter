@@ -8,7 +8,7 @@ This tool processes ChatGPT export JSON files and transforms them into:
 
 - **Evidence**: Linearized conversation markdown files (`_evidence/<conversation_id>/conversation.md`)
 - **Atoms**: Extracted knowledge atoms in JSONL format (`_atoms/<conversation_id>/{facts,decisions,open_questions}.jsonl`)
-- **Docs**: Compiled human-readable documentation (`docs/<conversation_id>/*.md` and `docs/decisions/<conversation_id>/ADR-*.md`)
+- **Docs**: Compiled human-readable documentation (`output/project/docs/<conversation_id>/*.md` and `output/project/docs/decisions/<conversation_id>/ADR-*.md`)
 
 ## Quick Start
 
@@ -41,6 +41,32 @@ This tool processes ChatGPT export JSON files and transforms them into:
    make compile       # Compile atoms into docs
    make consolidate   # Aggregate per-conversation outputs into project-wide packet
    ```
+
+## LangSmith Tracing
+
+Enable LangSmith tracing to monitor and debug LLM calls across the pipeline:
+
+1. **Install observability dependencies**:
+   ```bash
+   uv sync --extra observability
+   ```
+
+2. **Configure environment variables**:
+   ```bash
+   export LANGSMITH_TRACING=true
+   export LANGSMITH_API_KEY=your_langsmith_api_key
+   export LANGSMITH_PROJECT=chatgpt-conversation-knowledge-exporter  # optional, this is the default
+   export LANGSMITH_WORKSPACE_ID=your_workspace_id  # optional, for org-scoped keys
+   ```
+
+3. **Run the pipeline as usual** - traces will be automatically sent to LangSmith.
+
+**What gets traced:**
+- All OpenRouter/OpenAI LLM calls (Pass 1 extraction, Pass 2 refinement, topic labeling)
+- OpenAI embedding calls (during topic discovery)
+- DSPy program executions (meeting extraction, atom refinement, topic labeling)
+
+**Note:** Full prompts and outputs are sent to LangSmith for debugging purposes. Ensure compliance with your data policies.
 
 ## Logging
 
@@ -204,11 +230,34 @@ ckx extract ... 2>/dev/null
 
 ## CLI Usage
 
-The CLI accepts three input formats:
+The CLI accepts multiple input formats:
 - **Standard export**: A JSON file containing a list of conversations (standard ChatGPT export format)
 - **Single ChatGPT conversation**: A JSON file containing a single conversation object with `mapping` and `current_node` fields
 - **Claude conversation**: A JSON file containing a Claude AI export with `platform="CLAUDE_AI"` and `chat_messages[]` array
 - **Per-conversation directory**: A directory containing many `.json` files (each file is a single conversation object, like `chatgpt-conversations/`)
+- **Document directory**: A directory containing `.md` or `.docx` files (use `--input-kind document`)
+
+### Document Input Mode
+
+When processing generic documents (not meeting notes), use `--input-kind document`:
+
+```bash
+# Process a directory of Markdown and Word documents
+ckx run-all --input _sources/documents --input-kind document
+
+# Linearize documents
+ckx linearize --input _sources/documents --input-kind document --out _evidence
+
+# Extract atoms from documents
+ckx extract --input _sources/documents --input-kind document --evidence _evidence --out _atoms
+```
+
+**Supported formats in document mode:**
+- `.md` (Markdown): Split by headings into sections
+- `.docx` (Word): Split by heading styles into sections
+- `.txt` files are skipped with a warning (not supported in document mode)
+
+Documents are parsed into synthetic "conversations" with IDs prefixed `doc__...` and flow through the same extraction pipeline as conversations and meetings.
 
 ```bash
 # Linearize conversations (works with all formats)
@@ -235,7 +284,7 @@ ckx linearize --input chatgpt-conversations/ --out _evidence --limit 50
 ckx run-all --input chatgpt-conversations/ --limit 50
 
 # Compile docs from atoms
-ckx compile --atoms _atoms --out docs
+ckx compile --atoms _atoms --out output/project/docs
 
 # Run all steps (works with all formats)
 ckx run-all --input chatgpt-export.json
@@ -252,12 +301,86 @@ ckx run-all --input chatgpt-conversations/ --dashboard --dashboard-log-lines 100
 
 # Disable dashboard (useful for CI or when piping output)
 ckx run-all --input chatgpt-conversations/ --no-dashboard
+```
+
+### Split-by-Subdirectory Mode
+
+When processing a dataset directory that contains typed subfolders (documents, meetings, AI conversations), `run-all` automatically detects and processes each type separately, creating separate output trees.
+
+**Supported subdirectory names:**
+- **Documents**: `documents`, `document`, `docs`
+- **Meetings**: `meeting_artifacts`, `meeting`, `meetings`, `meeting_notes`, etc.
+- **AI Conversations**: `ai_conversations`, `ai-conversations`, `chatgpt_conversations`, `claude_conversations`, etc.
+
+**Example:**
+```bash
+# Process a dataset directory with typed subfolders
+ckx run-all --input _sources/Schreiber
+
+# This will:
+# 1. Detect subfolders: documents/, meeting_artifacts/, ai_conversations/
+# 2. Run the pipeline separately for each type
+# 3. Create separate output trees:
+#    - _evidence_schreiber_documents/
+#    - _atoms_schreiber_documents/
+#    - output/schreiber/documents/docs/
+#    - _evidence_schreiber_meetings/
+#    - _atoms_schreiber_meetings/
+#    - output/schreiber/meetings/docs/
+#    - _evidence_schreiber_ai/
+#    - _atoms_schreiber_ai/
+#    - output/schreiber/ai/docs/
+```
+
+**With explicit output directories:**
+When you provide explicit `--evidence`, `--atoms`, or `--docs` paths, typed subfolders are created under those roots:
+
+```bash
+ckx run-all --input _sources/Schreiber \
+  --evidence custom_evidence \
+  --atoms custom_atoms \
+  --docs custom_docs
+
+# Creates:
+# - custom_evidence/documents/
+# - custom_evidence/meetings/
+# - custom_evidence/ai/
+# - custom_atoms/documents/
+# - custom_atoms/meetings/
+# - custom_atoms/ai/
+# - custom_docs/documents/
+# - custom_docs/meetings/
+# - custom_docs/ai/
+```
+
+**Unified outputs:**
+To process each type separately but write all atoms/evidence/docs to the same directories, use `--unified-output`:
+
+```bash
+ckx run-all --input _sources/Schreiber --unified-output
+
+# This will:
+# 1. Process documents/, meeting_artifacts/, ai_conversations/ separately (with correct parsing)
+# 2. But write all outputs to unified directories:
+#    - _evidence_schreiber/ (all types together)
+#    - _atoms_schreiber/ (all types together)
+#    - output/schreiber/docs/ (all types together)
+# 3. Then you can consolidate everything with:
+ckx consolidate --atoms _atoms_schreiber --docs output/schreiber/docs --out output
+```
+
+**Disable split-by-subdir:**
+To use the original single-run behavior, use `--no-split-by-subdir`:
+
+```bash
+ckx run-all --input _sources/Schreiber --no-split-by-subdir
+```
 
 # Consolidate per-conversation outputs into project-wide knowledge packet
-ckx consolidate --atoms _atoms --docs docs --out output
+ckx consolidate --atoms _atoms --docs output/project/docs --out output
 
 # Consolidate without concatenating markdown docs
-ckx consolidate --atoms _atoms --docs docs --out output --no-include-docs
+ckx consolidate --atoms _atoms --docs output/project/docs --out output --no-include-docs
 ```
 
 ### Limiting Conversations
@@ -339,16 +462,16 @@ The dashboard updates in real-time, providing at-a-glance visibility into pipeli
 │       ├── facts.jsonl
 │       ├── decisions.jsonl
 │       └── open_questions.jsonl
-├── docs/              # Compiled documentation (per-conversation)
-│   ├── <conversation_id>/
-│   │   ├── overview.md
-│   │   ├── architecture.md
-│   │   └── ...
-│   └── decisions/
-│       └── <conversation_id>/
-│           └── ADR-*.md
 ├── output/            # Consolidated project-wide outputs
 │   └── project/
+│       ├── docs/      # Compiled documentation (per-conversation)
+│       │   ├── <conversation_id>/
+│       │   │   ├── overview.md
+│       │   │   ├── architecture.md
+│       │   │   └── ...
+│       │   └── decisions/
+│       │       └── <conversation_id>/
+│       │           └── ADR-*.md
 │       ├── atoms.jsonl
 │       ├── decisions.jsonl
 │       ├── open_questions.jsonl

@@ -10,6 +10,7 @@ from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
 from ck_exporter.logging import get_logger, should_show_progress, with_context
+from ck_exporter.pipeline.legacy_adapter import load_universal_atoms
 
 logger = get_logger(__name__)
 
@@ -94,14 +95,22 @@ def compile_conversation_docs(
     """Compile docs for a single conversation."""
     conv_atoms_dir = atoms_dir / conversation_id
 
-    # Load atoms
-    facts = load_atoms_jsonl(conv_atoms_dir / "facts.jsonl")
-    decisions = load_atoms_jsonl(conv_atoms_dir / "decisions.jsonl")
-    questions = load_atoms_jsonl(conv_atoms_dir / "open_questions.jsonl")
+    # Load universal atoms (falls back to legacy if needed)
+    all_atoms = load_universal_atoms(conv_atoms_dir)
+
+    # Filter by kind for backward compatibility
+    facts = [a for a in all_atoms if a.get("kind") in ["fact", "definition", "requirement", "metric", "assumption", "constraint", "idea"]]
+    decisions = [a for a in all_atoms if a.get("kind") == "decision"]
+    questions = [a for a in all_atoms if a.get("kind") == "open_question"]
+    action_items = [a for a in all_atoms if a.get("kind") == "action_item"]
+    meeting_topics = [a for a in all_atoms if a.get("kind") == "meeting_topic"]
+    risks = [a for a in all_atoms if a.get("kind") == "risk"]
+    blockers = [a for a in all_atoms if a.get("kind") == "blocker"]
+    dependencies = [a for a in all_atoms if a.get("kind") == "dependency"]
 
     conv_logger = with_context(logger, conversation_id=conversation_id)
 
-    if not facts and not decisions and not questions:
+    if not all_atoms:
         conv_logger.warning(
             "No atoms found",
             extra={"event": "compile.conversation.skipped", "reason": "no_atoms"},
@@ -131,6 +140,7 @@ def compile_conversation_docs(
             facts=facts,
             decisions=decisions,
             questions=questions,
+            action_items=action_items,
         )
         (conv_output_dir / "overview.md").write_text(overview_content, encoding="utf-8")
 
@@ -166,6 +176,13 @@ def compile_conversation_docs(
         else:
             # Fallback: simple markdown
             adr_path = adr_output_dir / f"ADR-{idx:04d}-{topic_safe}.md"
+            # Extract decision fields from universal atom meta
+            meta = decision.get('meta', {})
+            decision_meta = meta.get('decision', {})
+            rationale = decision_meta.get('rationale', 'Not provided')
+            alternatives = decision_meta.get('alternatives', [])
+            consequences = decision_meta.get('consequences', 'Not specified')
+            
             adr_content = f"""# ADR {idx:04d}: {decision.get('statement', 'Decision')}
 
 **Status**: {decision.get('status', 'active')}
@@ -177,21 +194,100 @@ def compile_conversation_docs(
 
 ## Rationale
 
-{decision.get('rationale', 'Not provided')}
+{rationale}
 
 ## Alternatives Considered
 
-{chr(10).join(f"- {alt}" for alt in decision.get('alternatives', [])) or 'None listed'}
+{chr(10).join(f"- {alt}" for alt in alternatives) or 'None listed'}
 
 ## Consequences
 
-{decision.get('consequences', 'Not specified')}
+{consequences}
 
 ## Evidence
 
 {chr(10).join(f"- Message ID: {e.get('message_id')} at {e.get('time_iso')}" for e in decision.get('evidence', []))}
 """
             adr_path.write_text(adr_content, encoding="utf-8")
+
+    # Compile action items doc (if any)
+    if action_items:
+        action_items_content = "# Action Items\n\n"
+        for idx, ai in enumerate(action_items, start=1):
+            statement = ai.get("statement", "")
+            status = ai.get("status", "active")
+            meta = ai.get("meta", {})
+            task_meta = meta.get("task", {}) or meta.get("meeting", {}).get("task", {})
+            owner = task_meta.get("owner")
+            due = task_meta.get("due")
+            
+            evidence_list = ai.get("evidence", [])
+            evidence_text = ""
+            if evidence_list:
+                ev = evidence_list[0]
+                msg_id = ev.get("message_id", "")
+                if msg_id:
+                    evidence_text = f" (from {msg_id})"
+            
+            owner_text = f" - Owner: {owner}" if owner else ""
+            due_text = f" - Due: {due}" if due else ""
+            status_text = f" [{status}]" if status != "active" else ""
+            
+            action_items_content += f"{idx}. {statement}{status_text}{owner_text}{due_text}{evidence_text}\n\n"
+        (conv_output_dir / "action_items.md").write_text(action_items_content, encoding="utf-8")
+
+    # Compile meeting topics doc (if any)
+    if meeting_topics:
+        topics_content = "# Meeting Topics\n\n"
+        for idx, topic in enumerate(meeting_topics, start=1):
+            statement = topic.get("statement", "")
+            meta = topic.get("meta", {})
+            summary = meta.get("meeting", {}).get("topic", {}).get("summary")
+            if summary:
+                topics_content += f"{idx}. **{statement}**\n   {summary}\n\n"
+            else:
+                topics_content += f"{idx}. {statement}\n\n"
+        (conv_output_dir / "meeting_topics.md").write_text(topics_content, encoding="utf-8")
+
+    # Compile risks/blockers/dependencies doc (if any)
+    issues = risks + blockers + dependencies
+    if issues:
+        issues_content = "# Risks, Blockers, and Dependencies\n\n"
+        if risks:
+            issues_content += "## Risks\n\n"
+            for idx, risk in enumerate(risks, start=1):
+                statement = risk.get("statement", "")
+                status = risk.get("status", "open")
+                meta = risk.get("meta", {})
+                owner = meta.get("issue", {}).get("owner")
+                status_text = f" [{status}]" if status != "open" else ""
+                owner_text = f" - Owner: {owner}" if owner else ""
+                issues_content += f"{idx}. {statement}{status_text}{owner_text}\n\n"
+        if blockers:
+            issues_content += "## Blockers\n\n"
+            for idx, blocker in enumerate(blockers, start=1):
+                statement = blocker.get("statement", "")
+                status = blocker.get("status", "open")
+                meta = blocker.get("meta", {})
+                owner = meta.get("issue", {}).get("owner")
+                blocked_by = meta.get("issue", {}).get("blocked_by")
+                status_text = f" [{status}]" if status != "open" else ""
+                owner_text = f" - Owner: {owner}" if owner else ""
+                blocked_by_text = f" - Blocked by: {blocked_by}" if blocked_by else ""
+                issues_content += f"{idx}. {statement}{status_text}{owner_text}{blocked_by_text}\n\n"
+        if dependencies:
+            issues_content += "## Dependencies\n\n"
+            for idx, dep in enumerate(dependencies, start=1):
+                statement = dep.get("statement", "")
+                status = dep.get("status", "open")
+                meta = dep.get("meta", {})
+                owner = meta.get("issue", {}).get("owner")
+                depends_on = meta.get("issue", {}).get("depends_on")
+                status_text = f" [{status}]" if status != "open" else ""
+                owner_text = f" - Owner: {owner}" if owner else ""
+                depends_on_text = f" - Depends on: {depends_on}" if depends_on else ""
+                issues_content += f"{idx}. {statement}{status_text}{owner_text}{depends_on_text}\n\n"
+        (conv_output_dir / "risks.md").write_text(issues_content, encoding="utf-8")
 
     conv_logger.info(
         "Compiled docs",
@@ -200,6 +296,11 @@ def compile_conversation_docs(
             "num_facts": len(facts),
             "num_decisions": len(decisions),
             "num_questions": len(questions),
+            "num_action_items": len(action_items),
+            "num_meeting_topics": len(meeting_topics),
+            "num_risks": len(risks),
+            "num_blockers": len(blockers),
+            "num_dependencies": len(dependencies),
         },
     )
 

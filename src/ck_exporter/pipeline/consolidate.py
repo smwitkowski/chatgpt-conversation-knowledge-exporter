@@ -6,13 +6,12 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from ck_exporter.logging import get_logger
+from ck_exporter.pipeline.legacy_adapter import load_universal_atoms
 
 logger = get_logger(__name__)
 
-# File names to process
-ATOM_FILES = ("facts.jsonl",)
-DECISION_FILES = ("decisions.jsonl",)
-QUESTION_FILES = ("open_questions.jsonl",)
+# Universal atoms file (single file per conversation)
+ATOMS_FILE = "atoms.jsonl"
 
 
 @dataclass
@@ -21,10 +20,11 @@ class ConsolidateStats:
 
     atoms_in: int = 0
     atoms_out: int = 0
-    decisions_in: int = 0
-    decisions_out: int = 0
-    questions_in: int = 0
-    questions_out: int = 0
+    atoms_by_kind: Dict[str, int] = None  # type: ignore
+
+    def __post_init__(self):
+        if self.atoms_by_kind is None:
+            self.atoms_by_kind = {}
 
 
 def _iter_conversation_dirs(atoms_dir: Path) -> List[Path]:
@@ -136,10 +136,8 @@ def consolidate_project(
     """
     stats = ConsolidateStats()
 
-    # Deduplication maps: key -> consolidated object
-    atoms_by_key: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
-    decisions_by_key: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
-    questions_by_key: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    # Deduplication map: (kind, normalized_statement, topic?) -> consolidated atom
+    atoms_by_key: Dict[Tuple[str, str, Optional[str]], Dict[str, Any]] = {}
 
     conversation_dirs = _iter_conversation_dirs(atoms_dir)
     logger.info(
@@ -153,99 +151,52 @@ def consolidate_project(
     for conv_dir in conversation_dirs:
         conv_id = conv_dir.name
 
-        # Process atoms (facts.jsonl)
-        for fn in ATOM_FILES:
-            for atom in _read_jsonl(conv_dir / fn):
-                stats.atoms_in += 1
-                # Dedupe key: (type, topic, statement)
-                key = (
-                    str(atom.get("type") or ""),
-                    str(atom.get("topic") or ""),
-                    str(atom.get("statement") or ""),
-                )
-                if key in atoms_by_key:
-                    # Merge evidence
-                    existing_ev = atoms_by_key[key].get("evidence", [])
-                    incoming_ev = atom.get("evidence", [])
-                    atoms_by_key[key]["evidence"] = _merge_evidence(
-                        existing_ev, incoming_ev, conv_id
-                    )
-                else:
-                    # New atom, add source conversation ID
-                    atom = dict(atom)
-                    atom["source_conversation_id"] = conv_id
-                    # Ensure evidence has conversation_id
-                    ev_list = atom.get("evidence", [])
-                    for ev in ev_list:
-                        if isinstance(ev, dict) and not ev.get("conversation_id"):
-                            ev["conversation_id"] = conv_id
-                    atoms_by_key[key] = atom
+        # Load universal atoms from atoms.jsonl
+        atoms_path = conv_dir / ATOMS_FILE
+        if not atoms_path.exists():
+            logger.debug(
+                "No atoms.jsonl found, skipping",
+                extra={"event": "consolidate.conversation.skipped", "conversation_id": conv_id},
+            )
+            continue
 
-        # Process decisions (decisions.jsonl)
-        for fn in DECISION_FILES:
-            for d in _read_jsonl(conv_dir / fn):
-                stats.decisions_in += 1
-                # Dedupe key: (type, topic, statement)
-                key = (
-                    str(d.get("type") or "decision"),
-                    str(d.get("topic") or ""),
-                    str(d.get("statement") or ""),
-                )
-                if key in decisions_by_key:
-                    # Merge evidence
-                    existing_ev = decisions_by_key[key].get("evidence", [])
-                    incoming_ev = d.get("evidence", [])
-                    decisions_by_key[key]["evidence"] = _merge_evidence(
-                        existing_ev, incoming_ev, conv_id
-                    )
-                else:
-                    # New decision, add source conversation ID
-                    d = dict(d)
-                    d["source_conversation_id"] = conv_id
-                    # Ensure evidence has conversation_id
-                    ev_list = d.get("evidence", [])
-                    for ev in ev_list:
-                        if isinstance(ev, dict) and not ev.get("conversation_id"):
-                            ev["conversation_id"] = conv_id
-                    decisions_by_key[key] = d
+        for atom in _read_jsonl(atoms_path):
+            stats.atoms_in += 1
+            kind = atom.get("kind", "fact")
+            statement = str(atom.get("statement") or "").strip()
+            topic = atom.get("topic")  # Optional
 
-        # Process open questions (open_questions.jsonl)
-        for fn in QUESTION_FILES:
-            for q in _read_jsonl(conv_dir / fn):
-                stats.questions_in += 1
-                # Dedupe key: (topic, question)
-                key = (
-                    str(q.get("topic") or ""),
-                    str(q.get("question") or ""),
-                )
-                if key in questions_by_key:
-                    # Merge evidence
-                    existing_ev = questions_by_key[key].get("evidence", [])
-                    incoming_ev = q.get("evidence", [])
-                    questions_by_key[key]["evidence"] = _merge_evidence(
-                        existing_ev, incoming_ev, conv_id
-                    )
-                else:
-                    # New question, add source conversation ID
-                    q = dict(q)
-                    q["source_conversation_id"] = conv_id
-                    # Ensure evidence has conversation_id
-                    ev_list = q.get("evidence", [])
-                    for ev in ev_list:
-                        if isinstance(ev, dict) and not ev.get("conversation_id"):
-                            ev["conversation_id"] = conv_id
-                    questions_by_key[key] = q
+            # Track by kind
+            stats.atoms_by_kind[kind] = stats.atoms_by_kind.get(kind, 0) + 1
 
-    # Convert to lists
+            # Dedupe key: (kind, normalized_statement, topic)
+            # Normalize statement: lowercase, strip whitespace
+            normalized_statement = statement.lower().strip()
+            key = (kind, normalized_statement, topic)
+
+            if key in atoms_by_key:
+                # Merge evidence
+                existing_ev = atoms_by_key[key].get("evidence", [])
+                incoming_ev = atom.get("evidence", [])
+                atoms_by_key[key]["evidence"] = _merge_evidence(
+                    existing_ev, incoming_ev, conv_id
+                )
+            else:
+                # New atom, add source conversation ID
+                atom = dict(atom)
+                atom["source_conversation_id"] = conv_id
+                # Ensure evidence has conversation_id
+                ev_list = atom.get("evidence", [])
+                for ev in ev_list:
+                    if isinstance(ev, dict) and not ev.get("conversation_id"):
+                        ev["conversation_id"] = conv_id
+                atoms_by_key[key] = atom
+
+    # Convert to list
     atoms_out = list(atoms_by_key.values())
-    decisions_out = list(decisions_by_key.values())
-    questions_out = list(questions_by_key.values())
-
     stats.atoms_out = len(atoms_out)
-    stats.decisions_out = len(decisions_out)
-    stats.questions_out = len(questions_out)
 
-    # Write consolidated JSONL files
+    # Write consolidated universal atoms file
     project_dir = out_dir / "project"
     logger.info(
         "Writing consolidated files",
@@ -253,30 +204,25 @@ def consolidate_project(
             "event": "consolidate.write",
             "project_dir": str(project_dir),
             "atoms_out": stats.atoms_out,
-            "decisions_out": stats.decisions_out,
-            "questions_out": stats.questions_out,
+            "atoms_by_kind": stats.atoms_by_kind,
         },
     )
 
     _write_jsonl(project_dir / "atoms.jsonl", atoms_out)
-    _write_jsonl(project_dir / "decisions.jsonl", decisions_out)
-    _write_jsonl(project_dir / "open_questions.jsonl", questions_out)
 
     # Write manifest
+    kind_summary = ", ".join([f"{kind}: {count}" for kind, count in sorted(stats.atoms_by_kind.items())])
     manifest_lines = [
         "# Project Knowledge Manifest",
         "",
         "## Statistics",
         "",
         f"- **Atoms**: {stats.atoms_in} input → {stats.atoms_out} output (deduped)",
-        f"- **Decisions**: {stats.decisions_in} input → {stats.decisions_out} output (deduped)",
-        f"- **Open Questions**: {stats.questions_in} input → {stats.questions_out} output (deduped)",
+        f"- **By Kind**: {kind_summary}",
         "",
         "## Files",
         "",
-        "- `atoms.jsonl` - Consolidated knowledge atoms",
-        "- `decisions.jsonl` - Consolidated decisions/ADRs",
-        "- `open_questions.jsonl` - Consolidated open questions",
+        "- `atoms.jsonl` - Consolidated universal atoms (schema v2)",
     ]
 
     if include_docs:

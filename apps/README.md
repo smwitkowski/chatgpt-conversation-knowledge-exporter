@@ -4,7 +4,7 @@ Topic review interface for browsing discovered topics and conversations.
 
 ## Architecture
 
-- **review-api**: Python FastAPI service that reads from `output/`, `docs/`, `_atoms/`, `_evidence/`
+- **review-api**: Python FastAPI service that reads from `output/`, `output/project/docs/`, `_atoms/`, `_evidence/`
 - **review-ui**: React frontend (Vite + TypeScript)
 - **review-addons**: Directory for custom addons
 

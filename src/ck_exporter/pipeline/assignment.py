@@ -1,14 +1,18 @@
 """Multi-label topic assignment for conversations."""
 
+import contextvars
 import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import numpy as np
 
+from ck_exporter.config import get_topic_max_concurrency
 from ck_exporter.core.models import ConversationTopics, TopicAssignment, TopicRegistry
 from ck_exporter.embeddings import EmbeddingClient, cosine_similarity
 from ck_exporter.logging import get_logger, with_context
+from ck_exporter.observability.langsmith import traceable_call, tracing_context
 from ck_exporter.pipeline.io import (
     convert_claude_to_chatgpt,
     is_claude_conversation,
@@ -17,6 +21,110 @@ from ck_exporter.pipeline.io import (
 from ck_exporter.pipeline.topics import build_conversation_documents, read_jsonl
 
 logger = get_logger(__name__)
+
+
+def _assign_topics_to_conversation(
+    i: int,
+    conv_id: str,
+    conv_embedding: np.ndarray,
+    titles: Dict[str, str],
+    meta: Dict[str, str],
+    topic_centroids: Dict[int, np.ndarray],
+    registry: TopicRegistry,
+    primary_threshold: float,
+    secondary_threshold: float,
+    atom_counts: Dict[str, int],
+) -> tuple[int, ConversationTopics]:
+    """
+    Assign topics to a single conversation.
+
+    Returns:
+        Tuple of (index, ConversationTopics) to maintain ordering
+    """
+    title = titles.get(conv_id, "Untitled Conversation")
+
+    # Compute similarity to all topic centroids
+    similarities = []
+    for topic_id, centroid in topic_centroids.items():
+        try:
+            score = cosine_similarity(conv_embedding, centroid)
+            topic_name = next((t.name for t in registry.topics if t.topic_id == topic_id), f"Topic {topic_id}")
+            similarities.append((topic_id, topic_name, score))
+        except Exception as e:
+            logger.warning(
+                "Error computing similarity for topic",
+                extra={
+                    "event": "assignment.similarity.error",
+                    "topic_id": topic_id,
+                    "conversation_id": conv_id,
+                },
+                exc_info=True,
+            )
+            continue
+
+    # Sort by score descending
+    similarities.sort(key=lambda x: x[2], reverse=True)
+
+    if not similarities:
+        # No valid similarities, create empty assignment
+        return (
+            i,
+            ConversationTopics(
+                conversation_id=conv_id,
+                title=title,
+                project_id=meta.get("project_id"),
+                project_name=meta.get("project_name"),
+                topics=[],
+                atom_count=atom_counts.get(conv_id, 0),
+                review_flag=True,
+            ),
+        )
+
+    # Primary topic: always assign top-scoring topic
+    primary_id, primary_name, primary_score = similarities[0]
+    topic_assignments = [
+        TopicAssignment(
+            topic_id=primary_id,
+            name=primary_name,
+            score=primary_score,
+            rank="primary",
+        )
+    ]
+
+    # Secondary topics: any topic with score >= secondary_threshold
+    # and within 0.25 of primary score
+    for topic_id, topic_name, score in similarities[1:]:
+        if score >= secondary_threshold and (primary_score - score) <= 0.25:
+            topic_assignments.append(
+                TopicAssignment(
+                    topic_id=topic_id,
+                    name=topic_name,
+                    score=score,
+                    rank="secondary",
+                )
+            )
+
+    # Review flag: set if primary score is low or if secondary is very close to primary
+    review_flag = False
+    if primary_score < primary_threshold:
+        review_flag = True
+    elif len(similarities) > 1:
+        secondary_score = similarities[1][2]
+        if secondary_score >= secondary_threshold and (primary_score - secondary_score) < 0.08:
+            review_flag = True
+
+    return (
+        i,
+        ConversationTopics(
+            conversation_id=conv_id,
+            title=title,
+            project_id=meta.get("project_id"),
+            project_name=meta.get("project_name"),
+            topics=topic_assignments,
+            atom_count=atom_counts.get(conv_id, 0),
+            review_flag=review_flag,
+        ),
+    )
 
 
 def load_topic_registry(registry_path: Path) -> TopicRegistry:
@@ -38,11 +146,9 @@ def load_topic_registry(registry_path: Path) -> TopicRegistry:
     return TopicRegistry(**data)
 
 
-def assign_topics(
+def _assign_topics_impl(
     input_path: Path,
     atoms_path: Path,
-    decisions_path: Path,
-    questions_path: Path,
     registry: TopicRegistry,
     embedding_model: str = "openai/text-embedding-3-small",
     primary_threshold: float = 0.60,
@@ -55,26 +161,7 @@ def assign_topics(
     limit: Optional[int] = None,
 ) -> List[ConversationTopics]:
     """
-    Assign topics to conversations using cosine similarity.
-
-    Args:
-        input_path: Path to conversation JSON file(s)
-        atoms_path: Path to consolidated atoms.jsonl
-        decisions_path: Path to consolidated decisions.jsonl
-        questions_path: Path to consolidated open_questions.jsonl
-        registry: TopicRegistry with discovered topics
-        embedding_model: OpenRouter model identifier
-        primary_threshold: Minimum score for primary topic
-        secondary_threshold: Minimum score for secondary topics
-        use_openrouter: Whether to use OpenRouter
-        use_pooling: Whether to use chunked pooling (default True)
-        chunk_tokens: Maximum tokens per chunk when pooling (default 600)
-        overlap_tokens: Token overlap between chunks when pooling (default 80)
-        cache_dir: Optional directory for caching embeddings
-        limit: Optional limit on number of conversations to process
-
-    Returns:
-        List of ConversationTopics assignments
+    Internal implementation of assign_topics (called via traceable_call wrapper).
     """
     # Validate that embedding model matches registry
     if registry.embedding_model != embedding_model:
@@ -88,7 +175,7 @@ def assign_topics(
         )
     # Build conversation documents
     documents, titles = build_conversation_documents(
-        input_path, atoms_path, decisions_path, questions_path
+        input_path, atoms_path, limit=limit
     )
 
     if not documents:
@@ -179,98 +266,74 @@ def assign_topics(
         )
         return []
 
-    # Assign topics to each conversation
-    assignments = []
+    # Assign topics to each conversation (parallelized)
+    max_concurrency = get_topic_max_concurrency()
     logger.info(
         "Assigning topics to conversations",
-        extra={"event": "assignment.start"},
+        extra={
+            "event": "assignment.start",
+            "num_conversations": len(conv_ids),
+            "max_concurrency": max_concurrency,
+        },
     )
 
-    for i, conv_id in enumerate(conv_ids):
+    def _process_conversation(i: int, conv_id: str) -> tuple[int, ConversationTopics]:
+        """Process a single conversation with tracing context."""
         conv_embedding = conv_embeddings[i]
-        title = titles.get(conv_id, "Untitled Conversation")
         meta = project_meta.get(conv_id, {})
+        
+        with tracing_context(conversation_id=conv_id):
+            return _assign_topics_to_conversation(
+                i=i,
+                conv_id=conv_id,
+                conv_embedding=conv_embedding,
+                titles=titles,
+                meta=meta,
+                topic_centroids=topic_centroids,
+                registry=registry,
+                primary_threshold=primary_threshold,
+                secondary_threshold=secondary_threshold,
+                atom_counts=atom_counts,
+            )
 
-        # Compute similarity to all topic centroids
-        similarities = []
-        for topic_id, centroid in topic_centroids.items():
+    # Process conversations with bounded concurrency
+    assignments_dict: Dict[int, ConversationTopics] = {}
+    with ThreadPoolExecutor(max_workers=max_concurrency) as executor:
+        # Submit all conversations with their indices (propagate contextvars for LangSmith nesting)
+        futures: dict[Any, int] = {}
+        for i, conv_id in enumerate(conv_ids):
+            ctx = contextvars.copy_context()
+            future = executor.submit(ctx.run, _process_conversation, i, conv_id)
+            futures[future] = i
+
+        # Collect results as they complete
+        for future in as_completed(futures):
             try:
-                score = cosine_similarity(conv_embedding, centroid)
-                topic_name = next((t.name for t in registry.topics if t.topic_id == topic_id), f"Topic {topic_id}")
-                similarities.append((topic_id, topic_name, score))
+                idx, assignment = future.result()
+                assignments_dict[idx] = assignment
             except Exception as e:
-                logger.warning(
-                    "Error computing similarity for topic",
+                conv_idx = futures[future]
+                conv_id = conv_ids[conv_idx]
+                logger.exception(
+                    "Error assigning topics to conversation",
                     extra={
-                        "event": "assignment.similarity.error",
-                        "topic_id": topic_id,
+                        "event": "assignment.conversation.error",
+                        "conversation_id": conv_id,
                     },
-                    exc_info=True,
                 )
-                continue
-
-        # Sort by score descending
-        similarities.sort(key=lambda x: x[2], reverse=True)
-
-        if not similarities:
-            # No valid similarities, create empty assignment
-            assignments.append(
-                ConversationTopics(
+                # Create empty assignment on error
+                assignments_dict[conv_idx] = ConversationTopics(
                     conversation_id=conv_id,
-                    title=title,
-                    project_id=meta.get("project_id"),
-                    project_name=meta.get("project_name"),
+                    title=titles.get(conv_id, "Untitled Conversation"),
+                    project_id=project_meta.get(conv_id, {}).get("project_id"),
+                    project_name=project_meta.get(conv_id, {}).get("project_name"),
                     topics=[],
                     atom_count=atom_counts.get(conv_id, 0),
                     review_flag=True,
                 )
-            )
-            continue
 
-        # Primary topic: always assign top-scoring topic
-        primary_id, primary_name, primary_score = similarities[0]
-        topic_assignments = [
-            TopicAssignment(
-                topic_id=primary_id,
-                name=primary_name,
-                score=primary_score,
-                rank="primary",
-            )
-        ]
-
-        # Secondary topics: any topic with score >= secondary_threshold
-        # and within 0.25 of primary score
-        for topic_id, topic_name, score in similarities[1:]:
-            if score >= secondary_threshold and (primary_score - score) <= 0.25:
-                topic_assignments.append(
-                    TopicAssignment(
-                        topic_id=topic_id,
-                        name=topic_name,
-                        score=score,
-                        rank="secondary",
-                    )
-                )
-
-        # Review flag: set if primary score is low or if secondary is very close to primary
-        review_flag = False
-        if primary_score < primary_threshold:
-            review_flag = True
-        elif len(similarities) > 1:
-            secondary_score = similarities[1][2]
-            if secondary_score >= secondary_threshold and (primary_score - secondary_score) < 0.08:
-                review_flag = True
-
-        assignments.append(
-            ConversationTopics(
-                conversation_id=conv_id,
-                title=title,
-                project_id=meta.get("project_id"),
-                project_name=meta.get("project_name"),
-                topics=topic_assignments,
-                atom_count=atom_counts.get(conv_id, 0),
-                review_flag=review_flag,
-            )
-            )
+    # Sort by index to maintain deterministic ordering
+    assignments = [assignments_dict[i] for i in sorted(assignments_dict.keys())]
 
     logger.info(
         "Assigned topics to conversations",
@@ -280,6 +343,70 @@ def assign_topics(
         },
     )
     return assignments
+
+
+def assign_topics(
+    input_path: Path,
+    atoms_path: Path,
+    registry: TopicRegistry,
+    embedding_model: str = "openai/text-embedding-3-small",
+    primary_threshold: float = 0.60,
+    secondary_threshold: float = 0.55,
+    use_openrouter: bool = True,
+    use_pooling: bool = True,
+    chunk_tokens: int = 600,
+    overlap_tokens: int = 80,
+    cache_dir: Optional[Path] = None,
+    limit: Optional[int] = None,
+) -> List[ConversationTopics]:
+    """
+    Assign topics to conversations using cosine similarity.
+
+    Args:
+        input_path: Path to conversation JSON file(s)
+        atoms_path: Path to consolidated atoms.jsonl (universal format)
+        registry: TopicRegistry with discovered topics
+        embedding_model: OpenRouter model identifier
+        primary_threshold: Minimum score for primary topic
+        secondary_threshold: Minimum score for secondary topics
+        use_openrouter: Whether to use OpenRouter
+        use_pooling: Whether to use chunked pooling (default True)
+        chunk_tokens: Maximum tokens per chunk when pooling (default 600)
+        overlap_tokens: Token overlap between chunks when pooling (default 80)
+        cache_dir: Optional directory for caching embeddings
+        limit: Optional limit on number of conversations to process
+
+    Returns:
+        List of ConversationTopics assignments
+    """
+    # Build conversation documents to get count for metadata
+    documents, _ = build_conversation_documents(input_path, atoms_path, limit=limit)
+    num_conversations = len(documents) if documents else 0
+    
+    return traceable_call(
+        lambda: _assign_topics_impl(
+            input_path=input_path,
+            atoms_path=atoms_path,
+            registry=registry,
+            embedding_model=embedding_model,
+            primary_threshold=primary_threshold,
+            secondary_threshold=secondary_threshold,
+            use_openrouter=use_openrouter,
+            use_pooling=use_pooling,
+            chunk_tokens=chunk_tokens,
+            overlap_tokens=overlap_tokens,
+            cache_dir=cache_dir,
+            limit=limit,
+        ),
+        name="assign_topics",
+        run_type="chain",
+        metadata={
+            "num_conversations": num_conversations,
+            "num_topics": registry.num_topics,
+            "embedding_model": embedding_model,
+        },
+        tags=["topic_assignment"],
+    )
 
 
 def save_assignments(assignments: List[ConversationTopics], output_path: Path) -> None:

@@ -1,8 +1,10 @@
 """Topic discovery and labeling pipeline orchestration."""
 
+import contextvars
 import json
 import logging
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -13,10 +15,12 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskPr
 from umap import UMAP
 
 from ck_exporter.adapters.fs_jsonl import read_jsonl as _read_jsonl
+from ck_exporter.config import get_topic_max_concurrency
 from ck_exporter.core.models import Topic, TopicRegistry
 from ck_exporter.core.ports.embedder import Embedder
 from ck_exporter.core.ports.topic_labeler import TopicLabeler
 from ck_exporter.logging import get_logger, should_show_progress
+from ck_exporter.observability.langsmith import traceable_call, tracing_context
 from ck_exporter.pipeline.io import (
     convert_claude_to_chatgpt,
     is_claude_conversation,
@@ -34,25 +38,31 @@ def read_jsonl(path: Path) -> List[Dict[str, Any]]:
 def build_conversation_documents(
     input_path: Path,
     atoms_path: Path,
-    decisions_path: Path,
-    questions_path: Path,
     limit: Optional[int] = None,
+    include_kinds: Optional[List[str]] = None,
+    exclude_kinds: Optional[List[str]] = None,
 ) -> Tuple[Dict[str, str], Dict[str, str]]:
     """
-    Build documents for each conversation by concatenating artifacts.
+    Build documents for each conversation by concatenating artifacts from universal atoms.
 
     Args:
         input_path: Path to conversation JSON file(s)
-        atoms_path: Path to consolidated atoms.jsonl
-        decisions_path: Path to consolidated decisions.jsonl
-        questions_path: Path to consolidated open_questions.jsonl
+        atoms_path: Path to consolidated atoms.jsonl (universal format)
         limit: Optional limit on number of conversations to process
+        include_kinds: Optional list of atom kinds to include (default: fact, decision, open_question)
+        exclude_kinds: Optional list of atom kinds to exclude (default: action_item, meeting_topic, risk, blocker, dependency)
 
     Returns:
         Tuple of (conversation_documents, conversation_titles)
         - conversation_documents: dict mapping conversation_id to document text
         - conversation_titles: dict mapping conversation_id to title
     """
+    # Default include/exclude kinds for topic discovery
+    if include_kinds is None:
+        include_kinds = ["fact", "decision", "open_question"]
+    if exclude_kinds is None:
+        exclude_kinds = ["action_item", "meeting_topic", "risk", "blocker", "dependency"]
+
     # Load conversations to get titles
     conversations = load_conversations(input_path, limit=limit)
     conversation_titles = {}
@@ -78,36 +88,46 @@ def build_conversation_documents(
         elif project_id:
             conversation_projects[conv_id] = str(project_id)
 
-    # Load consolidated artifacts
-    atoms = read_jsonl(atoms_path)
-    decisions = read_jsonl(decisions_path)
-    questions = read_jsonl(questions_path)
+    # Load consolidated universal atoms
+    all_atoms = read_jsonl(atoms_path)
 
-    # Group artifacts by conversation_id
-    atoms_by_conv = defaultdict(list)
+    # Filter atoms by kind
+    filtered_atoms = []
+    for atom in all_atoms:
+        kind = atom.get("kind", "")
+        if include_kinds and kind not in include_kinds:
+            continue
+        if exclude_kinds and kind in exclude_kinds:
+            continue
+        filtered_atoms.append(atom)
+
+    # Group artifacts by conversation_id and kind
+    facts_by_conv = defaultdict(list)
     decisions_by_conv = defaultdict(list)
     questions_by_conv = defaultdict(list)
 
-    for atom in atoms:
+    for atom in filtered_atoms:
         conv_id = atom.get("source_conversation_id", "")
-        if conv_id:
-            atoms_by_conv[conv_id].append(atom.get("statement", ""))
+        if not conv_id:
+            continue
+        kind = atom.get("kind", "")
+        statement = atom.get("statement", "").strip()
+        if not statement:
+            continue
 
-    for decision in decisions:
-        conv_id = decision.get("source_conversation_id", "")
-        if conv_id:
-            decisions_by_conv[conv_id].append(decision.get("statement", ""))
-
-    for question in questions:
-        conv_id = question.get("source_conversation_id", "")
-        if conv_id:
-            questions_by_conv[conv_id].append(question.get("question", ""))
+        if kind == "decision":
+            decisions_by_conv[conv_id].append(statement)
+        elif kind == "open_question":
+            questions_by_conv[conv_id].append(statement)
+        else:
+            # Facts and other kinds
+            facts_by_conv[conv_id].append(statement)
 
     # Build documents
     conversation_documents = {}
     all_conv_ids = (
         set(conversation_titles.keys())
-        | set(atoms_by_conv.keys())
+        | set(facts_by_conv.keys())
         | set(decisions_by_conv.keys())
         | set(questions_by_conv.keys())
     )
@@ -120,10 +140,10 @@ def build_conversation_documents(
         if project_label:
             parts.append(f"Project: {project_label}")
 
-        atom_statements = atoms_by_conv.get(conv_id, [])
-        if atom_statements:
+        fact_statements = facts_by_conv.get(conv_id, [])
+        if fact_statements:
             parts.append("\nFacts and Knowledge:")
-            parts.extend(f"- {stmt}" for stmt in atom_statements)
+            parts.extend(f"- {stmt}" for stmt in fact_statements)
 
         decision_statements = decisions_by_conv.get(conv_id, [])
         if decision_statements:
@@ -140,7 +160,7 @@ def build_conversation_documents(
     return conversation_documents, conversation_titles
 
 
-def discover_topics(
+def _discover_topics_impl(
     documents: Dict[str, str],
     embedder: Embedder,
     target_topics: int = 50,
@@ -150,19 +170,7 @@ def discover_topics(
     cache_dir: Optional[Path] = None,
 ) -> Tuple[BERTopic, np.ndarray, List[str]]:
     """
-    Discover topics using BERTopic with pre-computed embeddings.
-
-    Args:
-        documents: Dict mapping conversation_id to document text
-        embedder: Embedder implementation
-        target_topics: Target number of topics
-        use_pooling: Whether to use chunked pooling (default True)
-        chunk_tokens: Maximum tokens per chunk when pooling (default 600)
-        overlap_tokens: Token overlap between chunks when pooling (default 80)
-        cache_dir: Optional directory for caching embeddings
-
-    Returns:
-        Tuple of (bertopic_model, embeddings, doc_ids)
+    Internal implementation of discover_topics (called via traceable_call wrapper).
     """
     if not documents:
         raise ValueError("No documents provided")
@@ -245,6 +253,249 @@ def discover_topics(
     return topic_model, embeddings, doc_ids
 
 
+def discover_topics(
+    documents: Dict[str, str],
+    embedder: Embedder,
+    target_topics: int = 50,
+    use_pooling: bool = True,
+    chunk_tokens: int = 600,
+    overlap_tokens: int = 80,
+    cache_dir: Optional[Path] = None,
+) -> Tuple[BERTopic, np.ndarray, List[str]]:
+    """
+    Discover topics using BERTopic with pre-computed embeddings.
+
+    Args:
+        documents: Dict mapping conversation_id to document text
+        embedder: Embedder implementation
+        target_topics: Target number of topics
+        use_pooling: Whether to use chunked pooling (default True)
+        chunk_tokens: Maximum tokens per chunk when pooling (default 600)
+        overlap_tokens: Token overlap between chunks when pooling (default 80)
+        cache_dir: Optional directory for caching embeddings
+
+    Returns:
+        Tuple of (bertopic_model, embeddings, doc_ids)
+    """
+    num_conversations = len(documents) if documents else 0
+    embedding_model = getattr(embedder, "model", "unknown")
+    
+    return traceable_call(
+        lambda: _discover_topics_impl(
+            documents=documents,
+            embedder=embedder,
+            target_topics=target_topics,
+            use_pooling=use_pooling,
+            chunk_tokens=chunk_tokens,
+            overlap_tokens=overlap_tokens,
+            cache_dir=cache_dir,
+        ),
+        name="discover_topics",
+        run_type="chain",
+        metadata={
+            "num_conversations": num_conversations,
+            "target_topics": target_topics,
+            "embedding_model": embedding_model,
+        },
+        tags=["topic_discovery"],
+    )
+
+
+def _label_single_topic(
+    topic_id: int,
+    topic_model: BERTopic,
+    topics_out: np.ndarray,
+    doc_ids: List[str],
+    doc_texts: List[str],
+    labeler: TopicLabeler,
+) -> Optional[Topic]:
+    """
+    Label a single topic using LLM.
+
+    Args:
+        topic_id: Topic ID to label
+        topic_model: Fitted BERTopic model
+        topics_out: Topic assignments for each document
+        doc_ids: List of conversation IDs
+        doc_texts: List of document texts
+        labeler: Topic labeler implementation
+
+    Returns:
+        Topic object or None if topic should be skipped
+    """
+    if topic_id == -1:  # Skip outlier topic
+        return None
+
+    # Get representative documents for this topic
+    topic_docs = []
+    for i, doc_topic in enumerate(topics_out):
+        if doc_topic == topic_id:
+            topic_docs.append((doc_ids[i], doc_texts[i]))
+
+    # Take top 3 representative documents
+    representative_docs = topic_docs[:3]
+    if not representative_docs:
+        return None
+
+    # Get keywords from BERTopic
+    topic_words = topic_model.get_topic(topic_id)
+    keywords = [word for word, _ in topic_words[:10]] if topic_words else []
+
+    # Label using labeler with tracing context
+    with tracing_context(topic_id=topic_id):
+        label_data = labeler.label_topic(topic_id, representative_docs, keywords)
+    
+    name = label_data.get("name", f"Topic {topic_id}")
+    description = label_data.get("description", "No description available")
+
+    # Get representative conversation IDs
+    rep_conv_ids = [conv_id for conv_id, _ in representative_docs]
+
+    return Topic(
+        topic_id=topic_id,
+        name=name,
+        description=description,
+        keywords=keywords,
+        representative_conversations=rep_conv_ids,
+    )
+
+
+def _label_topics_with_llm_impl(
+    topic_model: BERTopic,
+    documents: Dict[str, str],
+    doc_ids: List[str],
+    doc_texts: List[str],
+    labeler: TopicLabeler,
+) -> List[Topic]:
+    """
+    Internal implementation of label_topics_with_llm (called via traceable_call wrapper).
+    """
+    # Get topic info from BERTopic
+    topic_info = topic_model.get_topic_info()
+    topics_out = topic_model.topics_
+
+    logger.info(
+        "Labeling topics with LLM",
+        extra={
+            "event": "topics.labeling.start",
+            "num_topics": len(topic_info),
+        },
+    )
+
+    # Collect valid topic IDs (excluding outlier -1)
+    valid_topic_rows = []
+    for idx, row in topic_info.iterrows():
+        topic_id = int(row["Topic"])
+        if topic_id != -1:
+            valid_topic_rows.append((idx, topic_id))
+
+    if not valid_topic_rows:
+        logger.warning(
+            "No valid topics to label",
+            extra={"event": "topics.labeling.no_topics"},
+        )
+        return []
+
+    max_concurrency = get_topic_max_concurrency()
+    logger.debug(
+        "Labeling topics with parallelization",
+        extra={
+            "event": "topics.labeling.parallel.start",
+            "num_topics": len(valid_topic_rows),
+            "max_concurrency": max_concurrency,
+        },
+    )
+
+    # Progress bar will be rendered conditionally based on logging mode
+    from rich.console import Console
+
+    discovered_topics_dict: Dict[int, Topic] = {}
+
+    if should_show_progress():
+        console = Console(stderr=True)
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            console=console,
+        ) as progress:
+            task = progress.add_task("Labeling topics", total=len(topic_info))
+
+            # Process topics in parallel
+            with ThreadPoolExecutor(max_workers=max_concurrency) as executor:
+                futures: dict[Any, int] = {}
+                for idx, topic_id in valid_topic_rows:
+                    ctx = contextvars.copy_context()
+                    future = executor.submit(ctx.run, _label_single_topic, topic_id, topic_model, topics_out, doc_ids, doc_texts, labeler)
+                    futures[future] = (idx, topic_id)
+
+                # Collect results as they complete
+                completed_count = 0
+                for future in as_completed(futures):
+                    try:
+                        topic = future.result()
+                        idx, topic_id = futures[future]
+                        if topic is not None:
+                            discovered_topics_dict[topic_id] = topic
+                        completed_count += 1
+                        progress.update(task, advance=1)
+                    except Exception as e:
+                        idx, topic_id = futures[future]
+                        logger.exception(
+                            "Error labeling topic",
+                            extra={
+                                "event": "topics.labeling.error",
+                                "topic_id": topic_id,
+                            },
+                        )
+                        completed_count += 1
+                        progress.update(task, advance=1)
+
+                # Update progress for any skipped topics (outlier -1)
+                skipped_count = len(topic_info) - len(valid_topic_rows)
+                if skipped_count > 0:
+                    progress.update(task, advance=skipped_count)
+    else:
+        # Non-interactive mode: process without progress bar
+        with ThreadPoolExecutor(max_workers=max_concurrency) as executor:
+            futures: dict[Any, int] = {}
+            for idx, topic_id in valid_topic_rows:
+                ctx = contextvars.copy_context()
+                future = executor.submit(ctx.run, _label_single_topic, topic_id, topic_model, topics_out, doc_ids, doc_texts, labeler)
+                futures[future] = topic_id
+
+            # Collect results as they complete
+            for future in as_completed(futures):
+                try:
+                    topic = future.result()
+                    topic_id = futures[future]
+                    if topic is not None:
+                        discovered_topics_dict[topic_id] = topic
+                except Exception as e:
+                    topic_id = futures[future]
+                    logger.exception(
+                        "Error labeling topic",
+                        extra={
+                            "event": "topics.labeling.error",
+                            "topic_id": topic_id,
+                        },
+                    )
+
+    # Sort topics by topic_id for deterministic ordering
+    discovered_topics = [discovered_topics_dict[topic_id] for topic_id in sorted(discovered_topics_dict.keys())]
+
+    logger.info(
+        "Labeled topics with LLM",
+        extra={
+            "event": "topics.labeling.complete",
+            "num_labeled": len(discovered_topics),
+        },
+    )
+
+    return discovered_topics
+
+
 def label_topics_with_llm(
     topic_model: BERTopic,
     documents: Dict[str, str],
@@ -265,123 +516,24 @@ def label_topics_with_llm(
     Returns:
         List of Topic objects with names and descriptions
     """
-    # Get topic info from BERTopic
     topic_info = topic_model.get_topic_info()
-    topics_out = topic_model.topics_
-
-    discovered_topics = []
-
-    logger.info(
-        "Labeling topics with LLM",
-        extra={
-            "event": "topics.labeling.start",
-            "num_topics": len(topic_info),
+    num_topics = len([row for _, row in topic_info.iterrows() if int(row["Topic"]) != -1])
+    
+    return traceable_call(
+        lambda: _label_topics_with_llm_impl(
+            topic_model=topic_model,
+            documents=documents,
+            doc_ids=doc_ids,
+            doc_texts=doc_texts,
+            labeler=labeler,
+        ),
+        name="label_topics_with_llm",
+        run_type="chain",
+        metadata={
+            "num_topics": num_topics,
         },
+        tags=["topic_labeling"],
     )
-
-    # Progress bar will be rendered conditionally based on logging mode
-    from rich.console import Console
-
-    if should_show_progress():
-        console = Console(stderr=True)
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(),
-            TaskProgressColumn(),
-            console=console,
-        ) as progress:
-            task = progress.add_task("Labeling topics", total=len(topic_info))
-
-            for idx, row in topic_info.iterrows():
-                topic_id = int(row["Topic"])
-                if topic_id == -1:  # Skip outlier topic
-                    progress.update(task, advance=1)
-                    continue
-
-                # Get representative documents for this topic
-                topic_docs = []
-                for i, doc_topic in enumerate(topics_out):
-                    if doc_topic == topic_id:
-                        topic_docs.append((doc_ids[i], doc_texts[i]))
-
-                # Take top 3 representative documents
-                representative_docs = topic_docs[:3]
-                if not representative_docs:
-                    progress.update(task, advance=1)
-                    continue
-
-                # Get keywords from BERTopic
-                topic_words = topic_model.get_topic(topic_id)
-                keywords = [word for word, _ in topic_words[:10]] if topic_words else []
-
-                # Label using labeler
-                label_data = labeler.label_topic(topic_id, representative_docs, keywords)
-                name = label_data.get("name", f"Topic {topic_id}")
-                description = label_data.get("description", "No description available")
-
-                # Get representative conversation IDs
-                rep_conv_ids = [conv_id for conv_id, _ in representative_docs]
-
-                topic = Topic(
-                    topic_id=topic_id,
-                    name=name,
-                    description=description,
-                    keywords=keywords,
-                    representative_conversations=rep_conv_ids,
-                )
-
-                discovered_topics.append(topic)
-                progress.update(task, advance=1)
-    else:
-        # Non-interactive mode: process without progress bar
-        for idx, row in topic_info.iterrows():
-            topic_id = int(row["Topic"])
-            if topic_id == -1:  # Skip outlier topic
-                continue
-
-            # Get representative documents for this topic
-            topic_docs = []
-            for i, doc_topic in enumerate(topics_out):
-                if doc_topic == topic_id:
-                    topic_docs.append((doc_ids[i], doc_texts[i]))
-
-            # Take top 3 representative documents
-            representative_docs = topic_docs[:3]
-            if not representative_docs:
-                continue
-
-            # Get keywords from BERTopic
-            topic_words = topic_model.get_topic(topic_id)
-            keywords = [word for word, _ in topic_words[:10]] if topic_words else []
-
-            # Label using labeler
-            label_data = labeler.label_topic(topic_id, representative_docs, keywords)
-            name = label_data.get("name", f"Topic {topic_id}")
-            description = label_data.get("description", "No description available")
-
-            # Get representative conversation IDs
-            rep_conv_ids = [conv_id for conv_id, _ in representative_docs]
-
-            topic = Topic(
-                topic_id=topic_id,
-                name=name,
-                description=description,
-                keywords=keywords,
-                representative_conversations=rep_conv_ids,
-            )
-
-            discovered_topics.append(topic)
-
-    logger.info(
-        "Labeled topics with LLM",
-        extra={
-            "event": "topics.labeling.complete",
-            "num_labeled": len(discovered_topics),
-        },
-    )
-
-    return discovered_topics
 
 
 def save_topic_registry(

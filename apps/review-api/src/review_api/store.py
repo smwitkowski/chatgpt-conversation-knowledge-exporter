@@ -18,14 +18,14 @@ class KnowledgeStore:
 
     def __init__(self, base_path: Path):
         """
-        Initialize store from base directory containing output/, docs/, _atoms/, _evidence/.
+        Initialize store from base directory containing output/, output/project/docs/, _atoms/, _evidence/.
 
         Args:
-            base_path: Root directory of the project (should contain output/, docs/, etc.)
+            base_path: Root directory of the project (should contain output/, output/project/docs/, etc.)
         """
         self.base_path = Path(base_path).resolve()
         self.output_dir = self.base_path / "output"
-        self.docs_dir = self.base_path / "docs"
+        self.docs_dir = self.output_dir / "project" / "docs"
         self.atoms_dir = self.base_path / "_atoms"
         self.evidence_dir = self.base_path / "_evidence"
 
@@ -174,10 +174,15 @@ class KnowledgeStore:
 
         # Load atoms (prefer per-conversation, fallback to consolidated)
         atoms = self._load_conversation_atoms(conversation_id)
-        # Filter by type (atoms are dicts, not Pydantic models at this point)
-        facts = [a for a in atoms if isinstance(a, dict) and a.get("type") != "decision" and a.get("type") != "question"]
-        decisions = [a for a in atoms if isinstance(a, dict) and a.get("type") == "decision"]
-        questions = [a for a in atoms if isinstance(a, dict) and a.get("type") == "question"]
+        # Filter by kind (universal atoms use "kind" field)
+        facts = [a for a in atoms if isinstance(a, dict) and a.get("kind") in ["fact", "definition", "requirement", "metric", "assumption", "constraint", "idea"]]
+        decisions = [a for a in atoms if isinstance(a, dict) and a.get("kind") == "decision"]
+        questions = [a for a in atoms if isinstance(a, dict) and a.get("kind") == "open_question"]
+        action_items = [a for a in atoms if isinstance(a, dict) and a.get("kind") == "action_item"]
+        meeting_topics = [a for a in atoms if isinstance(a, dict) and a.get("kind") == "meeting_topic"]
+        risks = [a for a in atoms if isinstance(a, dict) and a.get("kind") == "risk"]
+        blockers = [a for a in atoms if isinstance(a, dict) and a.get("kind") == "blocker"]
+        dependencies = [a for a in atoms if isinstance(a, dict) and a.get("kind") == "dependency"]
 
         # List available docs
         docs = self._list_conversation_docs(conversation_id)
@@ -193,6 +198,11 @@ class KnowledgeStore:
             "facts": facts,  # Already dicts
             "decisions": decisions,  # Already dicts
             "questions": questions,  # Already dicts
+            "action_items": action_items,  # Already dicts
+            "meeting_topics": meeting_topics,  # Already dicts
+            "risks": risks,  # Already dicts
+            "blockers": blockers,  # Already dicts
+            "dependencies": dependencies,  # Already dicts
             "docs": docs,
         }
 
@@ -200,22 +210,18 @@ class KnowledgeStore:
         """Load atoms for a conversation, preferring per-conversation files."""
         atoms = []
 
-        # Try per-conversation atoms first
+        # Try per-conversation atoms first (universal atoms.jsonl)
         conv_atoms_dir = self.atoms_dir / conversation_id
-        if conv_atoms_dir.exists():
-            for file_name in ["facts.jsonl", "decisions.jsonl", "open_questions.jsonl"]:
-                file_path = conv_atoms_dir / file_name
-                if file_path.exists():
-                    atoms.extend(self._read_jsonl(file_path))
+        atoms_path = conv_atoms_dir / "atoms.jsonl"
+        if atoms_path.exists():
+            atoms.extend(self._read_jsonl(atoms_path))
         else:
-            # Fallback: slice from consolidated files
-            consolidated_dir = self.output_dir / "project"
-            for file_name in ["atoms.jsonl", "decisions.jsonl", "open_questions.jsonl"]:
-                file_path = consolidated_dir / file_name
-                if file_path.exists():
-                    for obj in self._read_jsonl(file_path):
-                        if obj.get("source_conversation_id") == conversation_id:
-                            atoms.append(obj)
+            # Fallback: slice from consolidated atoms.jsonl
+            consolidated_atoms_path = self.output_dir / "project" / "atoms.jsonl"
+            if consolidated_atoms_path.exists():
+                for obj in self._read_jsonl(consolidated_atoms_path):
+                    if obj.get("source_conversation_id") == conversation_id:
+                        atoms.append(obj)
 
         return atoms
 
